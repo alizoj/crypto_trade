@@ -50,7 +50,7 @@ def challenge_section(m: dict, boot: dict) -> str:
 
 def build_report(*, run_id: int, spec, tradeset: TradeSet, challenge: ChallengeResult, classic: dict, stress: dict,
                  bootstrap: dict, baseline: dict | None, risk: RiskParams, cfg: ChallengeConfig, challenge_type: str,
-                 size: float, dataset_hash: str, out_path: Path) -> Path:
+                 size: float, dataset_hash: str, out_path: Path, horizons: dict | None = None) -> Path:
     from quant.backtest.engine import sample_equity_curves
 
     m = challenge.metrics
@@ -82,6 +82,22 @@ def build_report(*, run_id: int, spec, tradeset: TradeSet, challenge: ChallengeR
                      f'{bb["lo"] * 100:.1f}–{bb["hi"] * 100:.1f}% → '
                      f'{"значимо выше baseline" if sig else "НЕ значимо выше baseline (стратегия не доказала пользу)"}.</p>')
     sections.append(("Сравнение с baseline_random", body))
+
+    if horizons:
+        # у HashHedge нет срока стадий; основной H — окно оценки, длинные горизонты — куда уходят «не завершённые»
+        hrows = []
+        for h, v in horizons.items():
+            if h.startswith("_"):
+                continue
+            hrows.append([h, v.get("n_starts_full"), v.get("p_pass_s1"), v.get("p_pass_both"),
+                          (v.get("p_fail_daily") or 0) + (v.get("p_fail_total") or 0), v.get("p_unresolved"),
+                          v.get("median_days_s1")])
+        sections.append(("Без срока челленджа: длинные горизонты",
+                         '<p class="sub">У HashHedge нет срока ни на одной стадии; горизонт H — только окно оценки. '
+                         'Все горизонты — на одном наборе стартов (данных впереди хватает на самый длинный): '
+                         f'{" … ".join(s[:10] for s in horizons.get("_starts", []))}{horizons.get("_note", "")}.</p>' +
+                         table(["H, дней/стадию", "стартов", "P(s1)", "P(both)", "P(срыв)", "не завершено",
+                                "медиана дней s1"], hrows, ["str", "int", "pct", "pct", "pct", "pct", "num"])))
 
     if stress:
         srows = [[name, v.get("p_pass_s1"), v.get("p_pass_both"), v.get("p_fail_daily"), v.get("p_unresolved")]

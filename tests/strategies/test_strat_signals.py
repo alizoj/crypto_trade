@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 import pytest
 import yaml
-from strat_helpers import BASELINE_PARAMS, RSI_PIN_EW_PARAMS, SYMBOL, TEST_PARAMS, make_instrument, make_strategy
+from strat_helpers import BASELINE_PARAMS, FEATURE_RULES_PARAMS, RSI_PIN_EW_PARAMS, SYMBOL, TEST_PARAMS, make_instrument, make_strategy
 
 from quant.config import CONFIG_DIR
 from quant.schemas import SIGNALS
@@ -15,7 +15,7 @@ from quant.sessions import open_mask
 from quant.strategies import STRATEGIES, get_strategy, load_params, set_dotted, with_overrides
 from quant.strategies.confluence_v1 import FACTORS
 
-NAMES = ["confluence_v1", "baseline_random", "rsi_pin_ew"]
+NAMES = ["confluence_v1", "baseline_random", "rsi_pin_ew", "feature_rules"]
 SCREENER = ("rsi14", "adx", "atr_pct", "vwap_dist_pct", "htf_trend", "cvd_trend")
 
 
@@ -109,7 +109,8 @@ def test_tradfi_off_session(bars_1h, bars_4h, name):
     assert sig.sum() > 0 and not sig[~is_open].any()
     assert (fr["session_open"].to_numpy() == is_open).all() if "session_open" in fr.columns else True
     # флаг tradfi_off_session_signals: true — сигналы и вне сессии
-    base_params = {"baseline_random": BASELINE_PARAMS, "rsi_pin_ew": RSI_PIN_EW_PARAMS}.get(name, TEST_PARAMS)
+    base_params = {"baseline_random": BASELINE_PARAMS, "rsi_pin_ew": RSI_PIN_EW_PARAMS,
+                   "feature_rules": FEATURE_RULES_PARAMS}.get(name, TEST_PARAMS)
     params = {**base_params,
               "filters": {"tradfi_off_session_signals": True}}
     s_on = get_strategy(name, params)
@@ -159,7 +160,7 @@ def test_baseline_short_share(bars_1h):
 
 
 def test_registry_and_params(tmp_path):
-    assert set(STRATEGIES) == {"confluence_v1", "baseline_random", "rsi_pin_ew"}
+    assert set(STRATEGIES) == {"confluence_v1", "baseline_random", "rsi_pin_ew", "feature_rules"}
     for name in STRATEGIES:
         s = get_strategy(name)                                           # из config/strategies/<name>.yaml
         assert s.name == name

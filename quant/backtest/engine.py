@@ -16,7 +16,7 @@ import polars as pl
 
 from quant import instruments as I
 from quant.backtest import sim as S
-from quant.backtest.challenge import STRESS_PRESETS, ChallengeResult, RiskParams, Stress, evaluate
+from quant.backtest.challenge import STRESS_PRESETS, ChallengeResult, RiskParams, Stress, evaluate, rolling_starts
 from quant.backtest.metrics import by_group, classic_metrics
 from quant.backtest.sim import trace_simulate
 from quant.backtest.tradeset import TradeSet, merge, to_sim_arrays
@@ -79,8 +79,12 @@ def _btc_trend(strategy: str, start: datetime, end: datetime) -> pl.DataFrame | 
 
 
 def symbol_signals(strategy: str, inst: I.Instrument, bars: pl.DataFrame, *, params: dict, start: datetime,
-                   end: datetime, btc: pl.DataFrame | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Кадр оценок и сигналы одного инструмента (сигналы только внутри [start, end))."""
+                   end: datetime, btc: pl.DataFrame | None = None,
+                   breadth: pl.DataFrame | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Кадр оценок и сигналы одного инструмента (сигналы только внутри [start, end)).
+
+    breadth — ряд широты рынка (quant.backtest.breadth) для стратегий с фильтром широты.
+    """
     strat = get_strategy(strategy, params)
     tf = params.get("tf", "1h")
     meta = {"instrument": inst,
@@ -88,6 +92,8 @@ def symbol_signals(strategy: str, inst: I.Instrument, bars: pl.DataFrame, *, par
             "metrics": store.load_metrics(inst.hh_symbol, start - timedelta(days=WARMUP_DAYS), end)}
     if btc is not None and inst.group != "crypto_major":
         meta["btc_trend"] = btc
+    if breadth is not None:
+        meta["breadth"] = breadth
     frame = strat.compute(resample(bars, tf), hh_symbol=inst.hh_symbol, tf=tf, bars_1m=bars, meta=meta)
     sigs = strat.signals_from(frame, hh_symbol=inst.hh_symbol, tf=tf) if not frame.is_empty() else frame
     if not sigs.is_empty():
@@ -102,23 +108,39 @@ def build_tradeset(spec: BuildSpec, *, cfg: ChallengeConfig | None = None,
     mk = cfg.market("crypto_tradfi")
     exec_p = ExecParams.from_config(scfg.get("execution"), **spec.exec_overrides)
     insts = [I.get(s) for s in spec.symbols]
-    need_btc = spec.strategy != "baseline_random" and any(i.group != "crypto_major" for i in insts)
+    base_params = with_overrides(load_params(spec.strategy, None), spec.overrides)
+    use_breadth = float(base_params.get("breadth_min_frac") or 0.0) > 0
+    need_btc = spec.strategy != "baseline_random" and (use_breadth or any(i.group != "crypto_major" for i in insts))
     btc = _btc_trend(spec.strategy, spec.start - timedelta(days=WARMUP_DAYS), spec.end) if need_btc else None
+
+    def load(key: str) -> pl.DataFrame:
+        if bars_cache is not None and key in bars_cache:
+            return bars_cache[key]
+        b = store.load_bars(key, spec.start - timedelta(days=WARMUP_DAYS), spec.end, with_mark=True)
+        if bars_cache is not None:
+            bars_cache[key] = b
+        return b
+
+    breadth = None
+    if use_breadth:        # доля рынка по всей вселенной instruments.csv, а не только по торгуемым символам
+        from quant.backtest.breadth import cached_breadth
+        from quant.strategies.feature_rules import breadth_rules
+
+        breadth = cached_breadth(spec.start, spec.end, tf=base_params.get("tf", "1h"), htf_tf=base_params.get("htf", "4h"),
+                                 rules_long=breadth_rules(base_params, "long"),
+                                 rules_short=breadth_rules(base_params, "short"),
+                                 load_bars=lambda inst: load(inst.hh_symbol), warmup_days=WARMUP_DAYS, btc=btc)
     parts = []
     data_start, data_end = None, None
     for inst in insts:
         key = inst.hh_symbol
-        if bars_cache is not None and key in bars_cache:
-            bars = bars_cache[key]
-        else:
-            bars = store.load_bars(key, spec.start - timedelta(days=WARMUP_DAYS), spec.end, with_mark=True)
-            if bars_cache is not None:
-                bars_cache[key] = bars
+        bars = load(key)
         if bars.is_empty():
             log.warning("%s: нет данных за период — пропуск", key)
             continue
         params = with_overrides(load_params(spec.strategy, inst.group), spec.overrides)
-        _, sigs = symbol_signals(spec.strategy, inst, bars, params=params, start=spec.start, end=spec.end, btc=btc)
+        _, sigs = symbol_signals(spec.strategy, inst, bars, params=params, start=spec.start, end=spec.end, btc=btc,
+                                 breadth=breadth)
         if sigs.is_empty():
             continue
         funding = store.load_funding(key, spec.start, spec.end + timedelta(days=3))
@@ -151,16 +173,22 @@ class BacktestOutput:
     bootstrap: dict
     baseline: dict | None
     report_path: Path | None
+    horizons: dict = field(default_factory=dict)
 
 
 def run_backtest(spec: BuildSpec, *, challenge_type: str = "two_stage", size: float = 10_000,
                  horizon_days: float = 90, trader_horizon_days: float = 180, risk_overrides: dict | None = None,
                  n_boot: int = 100, with_baseline: bool = True, stress: bool = True, report: bool = True,
-                 kind: str = "backtest", challenge_fee_usd: float | None = None) -> BacktestOutput:
+                 kind: str = "backtest", challenge_fee_usd: float | None = None,
+                 extra_horizons: tuple[float, ...] = (180.0, 365.0)) -> BacktestOutput:
+    """extra_horizons — дополнительные горизонты на стадию: у HashHedge срока нет («no time limit on any stage»),
+    а основной H (по умолчанию 90 дней, раздел 7 ТЗ) — только окно оценки; длинные горизонты показывают, сколько
+    «не завершённых» за H стартов в итоге проходят или срываются."""
     cfg = load_challenge_config()
     scfg = load_strategy_config(spec.strategy)
     risk = RiskParams.from_config(scfg.get("risk"), **(risk_overrides or {}))
-    cache: dict[str, pl.DataFrame] = {}
+    # бары переиспользуются стрессом (delay ×2) и baseline; весь пул за годы в 1m — десятки ГБ, поэтому с потолком
+    cache = BoundedBarsCache(4e9)
     ts = build_tradeset(spec, cfg=cfg, bars_cache=cache)
     arr = to_sim_arrays(ts)
     d0, d1 = ts.data_start_min, ts.data_end_min
@@ -169,6 +197,8 @@ def run_backtest(spec: BuildSpec, *, challenge_type: str = "two_stage", size: fl
                   trader_horizon_days=trader_horizon_days, data_start_min=d0, data_end_min=d1,
                   challenge_fee_usd=fee)
     classic = classic_metrics(ts.trades)
+    horizons = _horizon_table(arr, cfg, challenge_type=challenge_type, size=size, risk=risk, base_h=horizon_days,
+                              extra=extra_horizons, d0=d0, d1=d1)
     stress_tab = {}
     if stress:
         for name, st in STRESS_PRESETS.items():
@@ -202,7 +232,7 @@ def run_backtest(spec: BuildSpec, *, challenge_type: str = "two_stage", size: fl
     params = {"strategy_params": {s: with_overrides(load_params(spec.strategy, I.get(s).group), spec.overrides)
                                   for s in spec.symbols[:1]}, "overrides": spec.overrides}
     metrics = {**ch.metrics, "classic": classic, "stress": stress_tab, "bootstrap": boot,
-               "baseline": base_metrics}
+               "baseline": base_metrics, "horizons": horizons}
     run_id = registry.record_run(kind=kind, strategy=spec.strategy, params=params, dataset_hash=dhash,
                                  config={"challenge_type": challenge_type, "size": size, "horizon_days": horizon_days,
                                          "risk": risk.__dict__, "options": cfg.options.model_dump(),
@@ -218,10 +248,32 @@ def run_backtest(spec: BuildSpec, *, challenge_type: str = "two_stage", size: fl
         report_path = build_report(run_id=run_id, spec=spec, tradeset=ts, challenge=ch, classic=classic,
                                    stress=stress_tab, bootstrap=boot, baseline=base_metrics, risk=risk,
                                    cfg=cfg, challenge_type=challenge_type, size=size, dataset_hash=dhash,
-                                   out_path=out_dir / "report.html")
+                                   out_path=out_dir / "report.html", horizons=horizons)
     registry.update_run(run_id, report_path=str(report_path) if report_path else None, artifacts_dir=str(out_dir))
     return BacktestOutput(run_id=run_id, tradeset=ts, challenge=ch, classic=classic, stress=stress_tab,
-                          bootstrap=boot, baseline=base_metrics, report_path=report_path)
+                          bootstrap=boot, baseline=base_metrics, report_path=report_path, horizons=horizons)
+
+
+def _horizon_table(arr, cfg: ChallengeConfig, *, challenge_type: str, size: float, risk: RiskParams, base_h: float,
+                   extra: tuple[float, ...], d0: int, d1: int) -> dict:
+    """P(pass) на нескольких горизонтах на ОДНОМ наборе стартов — тех, у кого данных хватает на самый длинный
+    (иначе у каждого горизонта свои старты, и числа несравнимы: P растёт с H только на одних и тех же стартах)."""
+    hs = sorted({float(base_h), *(float(x) for x in extra if float(x) > base_h)})
+    if len(hs) < 2:
+        return {}
+    mk = cfg.market("crypto_tradfi")
+    n_stages = len(cfg.stage_names(challenge_type))
+    common = rolling_starts(d0, d1, n_stages * hs[-1], boundary_min=mk.day_boundary_min,
+                            window_min=mk.reset_window_minutes)
+    if not len(common):
+        return {"_note": f"нет стартов с {n_stages * hs[-1]:g} днями данных впереди"}
+    out: dict = {"_starts": [from_min(int(common[0])).isoformat(), from_min(int(common[-1])).isoformat()]}
+    for h in hs:
+        hm = evaluate(arr, cfg, challenge_type=challenge_type, size=size, risk=risk, horizon_days=h,
+                      data_start_min=d0, data_end_min=d1, include_trader=False, starts=common).metrics
+        out[f"{h:g}"] = {k: hm.get(k) for k in ("n_starts_full", "p_pass_s1", "p_pass_both", "p_fail_daily",
+                                                "p_fail_total", "p_unresolved", "median_days_s1", "median_days_s2")}
+    return out
 
 
 def _flat_metrics(m: dict) -> dict:

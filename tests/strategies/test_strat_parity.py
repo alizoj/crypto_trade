@@ -16,8 +16,8 @@ from strat_helpers import SYMBOL, cut_meta, make_strategy
 from quant.data.aggregate import closed_bars
 from quant.strategies.base import Context, Signal
 
-CASES = [("confluence_v1", False), ("confluence_v1", True), ("baseline_random", False), ("rsi_pin_ew", False)]
-IDS = ["confluence", "confluence+filters", "baseline", "rsi_pin_ew"]
+CASES = [("confluence_v1", False), ("confluence_v1", True), ("baseline_random", False), ("rsi_pin_ew", False), ("feature_rules", False)]
+IDS = ["confluence", "confluence+filters", "baseline", "rsi_pin_ew", "feature_rules"]
 
 
 def _pick_bars(full: pl.DataFrame, start: int, n_random: int, seed: int) -> list[int]:

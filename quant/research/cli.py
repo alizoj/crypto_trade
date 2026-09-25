@@ -39,6 +39,32 @@ def _exits(args: argparse.Namespace) -> int:
     return 0
 
 
+def _forward(args: argparse.Namespace) -> int:
+    from datetime import timedelta
+    from pathlib import Path
+
+    from quant.config import get_settings
+    from quant.research.forward import evaluate_all, load_registry
+
+    reg = load_registry(Path(args.config) if args.config else None)
+    today = now_utc().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = parse_dt(args.end) if args.end else today
+    print(f"реестр от {reg.registered}; новые данные {reg.start:%Y-%m-%d} … {end:%Y-%m-%d} "
+          f"({(end - reg.start) / timedelta(days=1):.0f} дн.); вердикт — при >= {reg.min_trades} сделок сетапа на прогон")
+    res = evaluate_all(reg, end, names=args.name)
+    for r in res:
+        s = r["setup"]
+        ctrl = ", ".join("—" if x["r"] is None else f"{x['r']:+.3f} ({x['n']})" for x in r["control"])
+        rs = "—" if s["r"] is None else f"{s['r']:+.3f} ± {s['se'] or 0:.3f}"
+        print(f"  {r['name']:22} сетап: сделок {s['n']:5} ({s['runs']} прог.), R/сд {rs} | контроль: {ctrl} → {r['verdict']}")
+    out = get_settings().reports_dir / "forward" / f"forward_{now_utc():%Y%m%d_%H%M}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"registered": reg.registered, "start": reg.start.isoformat(), "end": end.isoformat(),
+                               "results": res}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    print(f"сохранено: {out}")
+    return 0
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("research", help="уровень 1: быстрый скрининг гипотез и выходов")
     s = p.add_subparsers(dest="cmd", required=True)
@@ -65,3 +91,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     e.add_argument("--end")
     e.add_argument("--overrides")
     e.set_defaults(func=_exits)
+    f = s.add_parser("forward", help="проверка зарегистрированных кандидатов на новых данных (config/forward)")
+    f.add_argument("--config", help="реестр кандидатов, по умолчанию config/forward/candidates.yaml")
+    f.add_argument("--end", help="конец периода (по умолчанию — начало текущих суток UTC)")
+    f.add_argument("--name", nargs="+", help="только эти кандидаты")
+    f.set_defaults(func=_forward)

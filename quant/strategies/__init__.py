@@ -16,12 +16,14 @@ from quant.strategies.base import Context, Factor, Signal, Strategy
 from quant.strategies.baseline_random import BaselineRandom
 from quant.strategies.common import deep_merge
 from quant.strategies.confluence_v1 import ConfluenceV1
+from quant.strategies.feature_rules import FeatureRules
 from quant.strategies.rsi_pin_ew import RsiPinEw
 
 STRATEGIES: dict[str, type[Strategy]] = {
     ConfluenceV1.name: ConfluenceV1,
     BaselineRandom.name: BaselineRandom,
     RsiPinEw.name: RsiPinEw,
+    FeatureRules.name: FeatureRules,
 }
 
 

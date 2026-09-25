@@ -22,6 +22,7 @@ TEST_PARAMS_FILTERS = {
 }
 BASELINE_PARAMS = {"signals_per_day": 4.0, "seed": 7}
 # Ослабленные пороги rsi_pin_ew — чтобы на синтетике было достаточно сигналов в обе стороны.
+FEATURE_RULES_PARAMS = {"rules_long": [["rsi14", "<=", 35]], "rules_short": [["rsi14", ">=", 65]], "rearm_bars": 6}
 RSI_PIN_EW_PARAMS = {"rsi_long_max": 50, "rsi_short_min": 50, "rsi_lookback": 8, "pin_wick": 0.4, "pin_body": 0.5,
                      "pin_lookback": 4, "w1_min_atr": 1.0}
 
@@ -59,4 +60,6 @@ def make_strategy(name: str, filters: bool = False):
         return get_strategy(name, BASELINE_PARAMS)
     if name == "rsi_pin_ew":
         return get_strategy(name, RSI_PIN_EW_PARAMS)
+    if name == "feature_rules":
+        return get_strategy(name, FEATURE_RULES_PARAMS)
     return get_strategy(name, TEST_PARAMS_FILTERS if filters else TEST_PARAMS)

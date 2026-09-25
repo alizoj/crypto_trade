@@ -1,0 +1,46 @@
+# Кандидаты для проверки на НОВЫХ данных (quant research forward).
+# Правила, контроли и критерии зафиксированы 2026-09-26, до появления этих данных, и НЕ меняются по результатам:
+# любая правка = новый кандидат с новой датой регистрации. Исторические данные по 2026-09-24 и hold-out уже
+# использованы в исследовании (журнал в памяти проекта), поэтому честная проверка начинается с 2026-09-25.
+registered: "2026-09-26"
+start: "2026-09-25"
+min_trades: 100            # меньше сделок у сетапа — вердикт не выносится («накапливается»)
+seeds: [42, 1, 2]          # seed случайных входов для контролей (и для сетапов со случайным входом)
+
+candidates:
+  - name: H-B trend majors
+    note: >-
+      Тренд на мейджорах: лонг при 4H-тренде вверх, цене у верхней границы недельного диапазона и растущей EMA50;
+      шорт зеркально. Прошла проверку 2025-01..2026-03 со слабой значимостью (t≈1.4).
+    strategy: feature_rules
+    groups: [crypto_major]
+    setup: {rules_long: [[htf_trend, "==", 1], [pos168, ">=", 0.95], [ema50_slope_atr, ">", 0]],
+            rules_short: [[htf_trend, "==", -1], [pos168, "<=", 0.05], [ema50_slope_atr, "<", 0]],
+            breadth_min_frac: 0.0, tp_r: 2.0, max_hold_min: 2880}
+    control: {entry_mode: random, random_signals_per_day: 0.135, random_short_share: 0.5}
+    criterion: setup_gt_control_and_positive
+
+  - name: Squeeze longs
+    note: >-
+      Сквиз после перекоса в шорты: лонг случайного альта в час, когда у >= 40% рынка funding <= -0.008%
+      (нижние 10% на 2022-04..2024-12). Найдено задним числом по контролю гипотезы H-D (+0.084R и +0.115R на двух
+      периодах против ~-0.10R у случайных лонгов без фильтра).
+    strategy: feature_rules
+    groups: [crypto_major, crypto_alt, tradfi]
+    setup: {entry_mode: random, random_signals_per_day: 0.83, random_short_share: 0.0,
+            rules_long: [[funding_rate, "<=", -0.00008]], rules_short: [], breadth_min_frac: 0.4}
+    control: {entry_mode: random, random_signals_per_day: 0.2, random_short_share: 0.0,
+              rules_long: [[funding_rate, "<=", -0.00008]], rules_short: [], breadth_min_frac: 0.0}
+    criterion: setup_gt_control_and_positive
+
+  - name: Cascade shorts
+    note: >-
+      Шорт в каскад распродаж: шорт случайного альта в час, когда у >= 20% рынка сильные продажи по CVD за 24 бара
+      (cvd_ratio <= -0.062) ниже EMA200 1h. Найдено задним числом по контролю гипотезы H2b.
+    strategy: feature_rules
+    groups: [crypto_major, crypto_alt, tradfi]
+    setup: {entry_mode: random, random_signals_per_day: 0.5, random_short_share: 1.0, rules_long: [],
+            rules_short: [[cvd_ratio, "<=", -0.062], [ema200_dist_atr, "<", 0]], breadth_min_frac: 0.2}
+    control: {entry_mode: random, random_signals_per_day: 0.13, random_short_share: 1.0, rules_long: [],
+              rules_short: [[cvd_ratio, "<=", -0.062], [ema200_dist_atr, "<", 0]], breadth_min_frac: 0.0}
+    criterion: setup_gt_control_and_positive

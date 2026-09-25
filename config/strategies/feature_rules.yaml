@@ -1,0 +1,67 @@
+# feature_rules — вход по правилам над признаками бара (quant/research/features.py).
+# По умолчанию — лучший кандидат исследования 2026-09-25: C2 + фильтр широты рынка.
+#   C2: лонг на капитуляции альтов с подтверждением разворота — 4H-цена ниже EMA200 на 20%+, 1h ATR >= 2%,
+#   за 24 бара нет отскока, цена вернулась выше дневного VWAP, RSI растёт за 3 бара.
+#   Фильтр: в этот же час C2 выполняется у >= 5% всех инструментов (массовый отскок).
+#   Исходная H1 — первые три правила без VWAP/RSI и без фильтра широты.
+name: feature_rules
+tf: 1h
+htf: 4h
+
+params:
+  rules_long:
+    - [htf_ema_dist_pct, "<=", -20]
+    - [atr_pct, ">=", 2.0]
+    - [ret24_atr, "<=", 0.1]
+    - [vwap_dist_atr, ">", 0]
+    - [rsi_chg3, ">", 0]
+  rules_short: []
+  rearm_bars: 24            # один вход на эпизод: правила не выполнялись 24 бара до сигнала
+  sl_atr: 1.5
+  tp_r: 2.0
+  max_hold_min: 2880
+  valid_min: 60
+  entry_type: market
+  sl_trigger: last
+  entry_mode: setup         # random — контроль: те же выходы, случайные входы
+  random_signals_per_day: 0.2
+  random_short_share: 0.5
+  seed: 42
+  # --- фильтр широты рынка: сигнал, только если правила выполнены у доли рынка >= breadth_min_frac
+  #     в этот же час (0 — выключен). Ряд широты считает движок по всем инструментам instruments.csv.
+  breadth_min_frac: 0.05
+  breadth_rules_long: null  # null — те же правила, что rules_long
+  breadth_rules_short: null
+
+groups:
+  crypto_major: {}
+  crypto_alt: {}
+  tradfi: {}
+
+search_space:
+  sl_atr: [1.0, 1.5, 2.0]
+  tp_r: [1.5, 2.0, 3.0]
+
+risk:
+  risk_per_trade: 0.10
+  abs_risk_cap_pct: 0.01
+  soft_daily_stop: 0.60
+  max_concurrent_positions: 3
+  max_correlated_exposure_pct: 0.02
+  flatten_before_reset: false
+  target_lock: true
+  target_lock_notional_usd: 100
+  min_notional_usd: 10
+
+execution:
+  exec_delay_min: [1, 10]
+  sl_tp_trigger: last
+  intrabar_resolution: sl_first
+  slippage_k_atr: 0.05
+  slippage_ref_notional_usd: 10000
+
+filters:
+  tradfi_off_session_signals: false
+  adx_filter: false
+  funding_oi_filter: false
+  cvd_divergence_filter: false

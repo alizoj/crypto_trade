@@ -17,8 +17,8 @@ from strat_helpers import SYMBOL, cut_meta, make_strategy
 from quant.data.aggregate import resample
 from quant.indicators.synthetic import random_walk_bars
 
-CASES = [("confluence_v1", False), ("confluence_v1", True), ("baseline_random", False), ("rsi_pin_ew", False)]
-IDS = ["confluence", "confluence+filters", "baseline", "rsi_pin_ew"]
+CASES = [("confluence_v1", False), ("confluence_v1", True), ("baseline_random", False), ("rsi_pin_ew", False), ("feature_rules", False)]
+IDS = ["confluence", "confluence+filters", "baseline", "rsi_pin_ew", "feature_rules"]
 
 
 def _cut_points(bars_1m: pl.DataFrame, k: int, seed: int) -> list[int]:

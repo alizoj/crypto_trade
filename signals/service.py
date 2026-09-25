@@ -5,6 +5,12 @@
 P ≥ min_prob, EV ≥ min_ev_r, n ≥ min_n, risk governor разрешает, нет активного сигнала по символу/стороне,
 бар не halted, сейчас не окно сброса, для TradFi открыта сессия базового рынка.
 Исход каждого сигнала отслеживается по рыночным данным (lifecycle).
+
+Фильтр широты рынка (стратегии с breadth_min_frac > 0, например feature_rules): решение о сигнале
+откладывается, пока закрытие того же бара ТФ сигнала не придёт от всех символов со свежими данными (или не
+истечёт breadth_grace_sec). Затем считается доля символов, у которых выполнены правила широты
+(breadth_hit_<side> в кадре), и сигналы стороны с долей ниже порога снимаются — как в бэктесте, после правила
+«один вход на эпизод». Символ, чей бар пришёл позже, использует уже посчитанную долю своего часа.
 """
 
 from __future__ import annotations
@@ -39,7 +45,8 @@ from signals.state import HTF_OF, SCREEN_TFS, SymbolState, on_bar, on_mark, warm
 log = logging.getLogger(__name__)
 
 LIVE_DEFAULTS = {"min_prob": 0.5, "min_ev_r": 0.10, "min_n": 100, "require_calibration": True,
-                 "watch_margin": 10.0, "stale_data_min": 5, "calibration_tol": 0.10}
+                 "watch_margin": 10.0, "stale_data_min": 5, "calibration_tol": 0.10, "breadth_grace_sec": 90}
+BREADTH_KEEP = 48                                   # сколько последних часов широты помнить (для опоздавших баров)
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -87,6 +94,12 @@ class SignalService:
         self.screener: dict[str, dict[str, dict]] = {tf: {} for tf in SCREEN_TFS}
         self.frames: dict[tuple[str, str], dict] = {}          # (sym, tf) → последняя строка кадра оценок
         self._strats: dict[tuple[str, str], Any] = {}
+        # фильтр широты рынка: порог из параметров стратегии; стратегия в live считается без него (см. docstring)
+        self.breadth_min = float((self.scfg.get("params") or {}).get("breadth_min_frac") or 0.0)
+        self._breadth_pending: dict[int, dict[str, dict]] = {}
+        self._breadth_done: dict[int, dict] = {}
+        self._breadth_timers: dict[int, asyncio.Task] = {}
+        self.breadth_last: dict | None = None
         self.ready = False
 
     # ------------------------------------------------------------------ запуск
@@ -153,7 +166,10 @@ class SignalService:
                 if row:
                     changed.append((tf, row))
                 if tf == self.signal_tf:
-                    await self._maybe_signal(sym, tf)
+                    if self.breadth_min > 0:
+                        await self._breadth_collect(sym, tf)
+                    else:
+                        await self._maybe_signal(sym, tf)
         # цена/возраст данных обновляются каждую минуту
         for tf in SCREEN_TFS:
             row = self.screener[tf].get(sym)
@@ -171,6 +187,8 @@ class SignalService:
         if key not in self._strats:
             inst = self.state[sym].inst
             params = with_overrides(load_params(self.strategy_name, inst.group), {"tf": tf, "htf": HTF_OF[tf]})
+            if self.breadth_min > 0:        # фильтр широты применяет сервис после сбора часа (_breadth_finalize)
+                params = with_overrides(params, {"breadth_min_frac": 0.0})
             self._strats[key] = (get_strategy(self.strategy_name, params), params)
         return self._strats[key]
 
@@ -295,6 +313,66 @@ class SignalService:
                 if prob["p"] < self.live["min_prob"] or (ev or -1) < self.live["min_ev_r"] or prob["n"] < self.live["min_n"]:
                     continue
             await self._create(st, tf, r, last, side, prob, ev, strat, params)
+
+    # ------------------------------------------------------------------ широта рынка
+
+    def _breadth_expected(self, key: int) -> int:
+        """Сколько символов должно прислать закрытие бара key: не halted и со свежими 1m-данными к этому моменту."""
+        lo = key - (int(self.live["stale_data_min"]) + 1) * 60_000
+        return sum(1 for st in self.state.values() if st.last_bar_ms is not None and st.last_bar_ms >= lo and not st.halted)
+
+    async def _breadth_collect(self, sym: str, tf: str) -> None:
+        last = self.frames.get((sym, tf))
+        if last is None or last.get("close_ts") is None:
+            return
+        key = int(last["close_ts"].timestamp() * 1000)
+        if key in self._breadth_done:                  # бар опоздал — доля часа уже посчитана
+            await self._breadth_gate_and_signal(sym, tf, last, self._breadth_done[key])
+            return
+        self._breadth_pending.setdefault(key, {})[sym] = last
+        if len(self._breadth_pending[key]) >= self._breadth_expected(key):
+            await self._breadth_finalize(key, tf)
+        elif key not in self._breadth_timers:
+            self._breadth_timers[key] = asyncio.create_task(self._breadth_timer(key, tf))
+
+    async def _breadth_timer(self, key: int, tf: str) -> None:
+        await asyncio.sleep(float(self.live["breadth_grace_sec"]))
+        if key not in self._breadth_done:
+            await self._breadth_finalize(key, tf)
+
+    async def _breadth_finalize(self, key: int, tf: str) -> None:
+        if key in self._breadth_done:
+            return
+        rows = self._breadth_pending.pop(key, {})
+        timer = self._breadth_timers.pop(key, None)
+        if timer is not None and timer is not asyncio.current_task():
+            timer.cancel()
+        ready = [r for r in rows.values() if (_num(r.get("atr")) or 0) > 0]
+        n = len(ready)
+        b = {"close_ts_ms": key, "n_sym": n,
+             "frac_long": sum(bool(r.get("breadth_hit_long")) for r in ready) / n if n else None,
+             "frac_short": sum(bool(r.get("breadth_hit_short")) for r in ready) / n if n else None}
+        self._breadth_done[key] = b
+        for old in sorted(self._breadth_done)[:-BREADTH_KEEP]:
+            self._breadth_done.pop(old, None)
+        self.breadth_last = b
+        log.info("широта рынка %s: символов %d, лонг %s, шорт %s", _iso(datetime.fromtimestamp(key / 1000, timezone.utc)),
+                 n, b["frac_long"], b["frac_short"])
+        for sym, row in rows.items():
+            await self._breadth_gate_and_signal(sym, tf, row, b)
+
+    async def _breadth_gate_and_signal(self, sym: str, tf: str, row: dict, b: dict) -> None:
+        cur = self.frames.get((sym, tf))
+        if cur is None or cur.get("close_ts") != row.get("close_ts"):
+            return                                     # по символу уже закрылся следующий бар — этот сигнал устарел
+        gated = dict(row)
+        for side in ("long", "short"):
+            frac = b.get(f"frac_{side}")
+            gated[f"breadth_{side}"] = frac
+            if frac is None or frac < self.breadth_min:
+                gated[f"signal_{side}"] = False
+        self.frames[(sym, tf)] = gated
+        await self._maybe_signal(sym, tf)
 
     async def _create(self, st: SymbolState, tf: str, r: dict, last: dict, side: str, prob: dict | None,
                       ev: float | None, strat, params: dict) -> None:  # noqa: ANN001

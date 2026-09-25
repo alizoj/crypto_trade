@@ -29,11 +29,22 @@ def _run(args: argparse.Namespace) -> int:
     risk = json.loads(args.risk) if args.risk else {}
     out = run_backtest(spec, challenge_type=args.challenge, size=args.size, horizon_days=args.horizon,
                        n_boot=args.boot, with_baseline=not args.no_baseline, stress=not args.no_stress,
-                       risk_overrides=risk, challenge_fee_usd=args.fee)
+                       risk_overrides=risk, challenge_fee_usd=args.fee,
+                       extra_horizons=tuple(float(x) for x in args.horizons.split(",") if x.strip()))
     m = out.challenge.metrics
     print(f"прогон #{out.run_id}: сделок {out.classic.get('n_trades')}, "
           f"P(s1)={m.get('p_pass_s1')}, P(both)={m.get('p_pass_both')}, P(fail daily)={m.get('p_fail_daily')}, "
           f"не завершено={m.get('p_unresolved')}")
+    if out.horizons:
+        st = out.horizons.get("_starts")
+        print("  горизонты на одном наборе стартов " + (f"{st[0][:10]} … {st[1][:10]}" if st else out.horizons.get("_note", "")) +
+              " (срока у HashHedge нет):")
+    for h, v in out.horizons.items():
+        if h.startswith("_"):
+            continue
+        print(f"    H={h} дн/стадию: стартов {v.get('n_starts_full')}, P(s1)={v.get('p_pass_s1')}, "
+              f"P(both)={v.get('p_pass_both')}, срыв={(v.get('p_fail_daily') or 0) + (v.get('p_fail_total') or 0)}, "
+              f"не завершено={v.get('p_unresolved')}")
     if out.report_path:
         print(f"отчёт: {out.report_path}")
     return 0
@@ -64,7 +75,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     r.add_argument("--end")
     r.add_argument("--challenge", default="two_stage", choices=["two_stage", "one_stage"])
     r.add_argument("--size", type=float, default=10_000)
-    r.add_argument("--horizon", type=float, default=90, help="горизонт H на стадию, дней")
+    r.add_argument("--horizon", type=float, default=90, help="горизонт H на стадию, дней (окно оценки)")
+    r.add_argument("--horizons", default="180,365",
+                   help="дополнительные горизонты на стадию через запятую (у HashHedge срока нет); пусто — не считать")
     r.add_argument("--boot", type=int, default=100, help="число bootstrap-повторов (0 — без)")
     r.add_argument("--fee", type=float, help="цена челленджа для EV")
     r.add_argument("--overrides", help='JSON dotted-путей: {"long.threshold": 70}')
