@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: collector
+    static_configs: [{targets: ["collector:9101"]}]
+  - job_name: signals
+    static_configs: [{targets: ["signals:9102"]}]

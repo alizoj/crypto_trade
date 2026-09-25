@@ -1,0 +1,61 @@
+# Правила HashHedge (раздел 2 ТЗ). Источник: hashhedge.gitbook.io/hashhedge-user-guide, сверено 2026-09-23.
+# Код не содержит ни одной цифры правил — всё читается отсюда.
+
+markets:
+  crypto_tradfi:
+    day_boundary_utc: "20:00"        # 00:00 UTC+4
+    reset_window_minutes: 10         # сброс происходит в окне 00:00–00:10 UTC+4
+    fees: {maker: 0.0001, taker: 0.0003, min_fee_usd: 0.0}
+    max_leverage: 5
+    leverage_base: equity            # gross notional <= max_leverage * equity  # ASSUMPTION (раздел 11, вопрос 4)
+    block_new_utc: null
+    auto_close_utc: null
+    max_shares_per_ticker: null
+  us_stocks:                         # фаза 8, отдельная платформа
+    day_boundary_utc: "04:00"        # 08:00 UTC+4
+    reset_window_minutes: 10
+    fees: {maker: 0.0004, taker: 0.0004, min_fee_usd: 1.0}
+    max_leverage: 5
+    leverage_base: balance           # buying power = balance * 5 на весь счёт
+    block_new_utc: "19:55"           # 23:55 UTC+4
+    auto_close_utc: "19:59"          # 23:59 UTC+4 (вопрос 13: переход на зимнее время)
+    max_shares_per_ticker: 10000
+
+challenges:
+  two_stage:
+    sizes: [5000, 10000, 25000, 50000, 100000, 150000, 200000]   # 150k — вопрос 12
+    stages:
+      - {name: stage1, target_pct: 0.08, daily_loss_pct: 0.05, max_loss_pct: 0.10, min_trading_days: 5}
+      - {name: stage2, target_pct: 0.06, daily_loss_pct: 0.05, max_loss_pct: 0.08, min_trading_days: 5}
+    trader: {daily_loss_pct: 0.05, max_loss_pct: 0.08}
+  one_stage:
+    sizes: [5000, 10000, 25000, 50000, 100000]
+    stages:
+      - {name: stage1, target_pct: 0.10, daily_loss_pct: 0.03, max_loss_pct: 0.06, min_trading_days: 3}
+    trader: {daily_loss_pct: 0.03, max_loss_pct: 0.06}
+
+options:
+  total_floor_mode: static           # static | trailing               (вопрос 1)
+  trailing_reference: equity         # equity | balance — для trailing
+  target_metric: balance             # balance | equity                (вопрос 2)
+  reset_window_mode: both            # new_day | old_day | both        (вопрос 5)  # ASSUMPTION
+  stage_start_balance: account_size  # вопрос 9  # ASSUMPTION
+  equity_price_source: mark          # mark | last (last — стресс-сценарий)
+  daily_loss_protection: false       # опция при покупке, 1 раз за жизнь счёта, все стадии
+  daily_loss_reset: false            # покупается после провала, только стадии 1–2
+  liquidation:
+    enabled: true
+    maintenance_margin_rate: 0.005   # ASSUMPTION (вопрос 4); на практике дневной лимит срабатывает раньше
+
+payouts:
+  profit_share: 0.80
+  profit_share_with_split: 0.90
+  period_days: 14
+  max_usd_per_period: 10000
+  min_usd: 100
+  require_flat: true                 # выплата только при закрытых позициях
+
+# Цена челленджа (вопрос 14) — заполнить вручную: {size: usd}
+challenge_fee_usd:
+  two_stage: {}
+  one_stage: {}

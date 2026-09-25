@@ -1,0 +1,23 @@
+{
+  "title": "HashHedge Quant — данные и сигналы",
+  "uid": "hh-quant",
+  "schemaVersion": 39,
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s",
+  "panels": [
+    {"type": "timeseries", "title": "Лаг данных по символу, с (топ-10)", "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+     "targets": [{"expr": "topk(10, quant_data_lag_seconds)", "legendFormat": "{{hh_symbol}}"}]},
+    {"type": "stat", "title": "Символов без данных > 5 мин", "gridPos": {"x": 12, "y": 0, "w": 6, "h": 8},
+     "targets": [{"expr": "count(quant_data_lag_seconds > 300) or vector(0)"}]},
+    {"type": "timeseries", "title": "Реконнекты WS за 1 ч", "gridPos": {"x": 18, "y": 0, "w": 6, "h": 8},
+     "targets": [{"expr": "increase(quant_ws_reconnects_total[1h])", "legendFormat": "{{source}}"}]},
+    {"type": "timeseries", "title": "Бары/мин по источнику", "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+     "targets": [{"expr": "rate(quant_bars_total[5m]) * 60", "legendFormat": "{{source}}"}]},
+    {"type": "timeseries", "title": "Задержка обработки бара сервисом сигналов, с", "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+     "targets": [{"expr": "quant_consumer_lag_seconds"}]},
+    {"type": "timeseries", "title": "Пересчёт скринера p95, с", "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+     "targets": [{"expr": "histogram_quantile(0.95, sum by (le, tf) (rate(quant_screener_recompute_seconds_bucket[10m])))", "legendFormat": "{{tf}}"}]},
+    {"type": "timeseries", "title": "Сигналы за 24 ч", "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+     "targets": [{"expr": "increase(quant_signals_total[24h])", "legendFormat": "{{side}} {{tf}}"}]}
+  ]
+}

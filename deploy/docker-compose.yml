@@ -1,0 +1,121 @@
+# Прод-развёртывание (раздел 4): без k8s. Порты БД/Redis наружу не открываются — только Caddy (443).
+# Запуск:  cp deploy/.env.example deploy/.env && docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+
+x-app: &app
+  build: {context: .., dockerfile: deploy/Dockerfile}
+  image: hashhedge-quant:latest
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    QUANT_DB_URL: postgresql+psycopg://quant:${POSTGRES_PASSWORD}@postgres:5432/quant
+    QUANT_REDIS_URL: redis://redis:6379/0
+    QUANT_CLICKHOUSE_URL: http://default:${CLICKHOUSE_PASSWORD}@clickhouse:8123/quant
+  volumes:
+    - data:/data
+    - reports:/reports
+  depends_on: [postgres, redis]
+  networks: [internal]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment: {POSTGRES_DB: quant, POSTGRES_USER: quant, POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"}
+    volumes: [pg:/var/lib/postgresql/data]
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis:/data]
+    networks: [internal]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    restart: unless-stopped
+    environment: {CLICKHOUSE_DB: quant, CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"}
+    volumes:
+      - ch:/var/lib/clickhouse
+      - ./clickhouse/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    ulimits: {nofile: {soft: 262144, hard: 262144}}
+    networks: [internal]
+
+  collector:
+    <<: *app
+    command: ["collector", "run", "--metrics-port", "9101"]
+
+  signals:
+    <<: *app
+    command: ["signals", "run", "--metrics-port", "9102"]
+    depends_on: [postgres, redis, collector]
+
+  api:
+    <<: *app
+    command: ["api", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      QUANT_DB_URL: postgresql+psycopg://quant:${POSTGRES_PASSWORD}@postgres:5432/quant
+      QUANT_REDIS_URL: redis://redis:6379/0
+      QUANT_COOKIE_SECURE: "true"
+
+  bot:
+    <<: *app
+    command: ["bot", "run"]
+
+  # ночная сверка live-баров с архивом (T+1) и догрузка гэпов (раздел 3.2.5)
+  maintenance:
+    <<: *app
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        while true; do
+          quant data backfill --all --datasets klines,mark,funding,metrics --start "$$(date -u -d '3 days ago' +%Y-%m-%d)";
+          quant data build --all; quant data fill-gaps --all; quant instruments validate;
+          sleep 86400;
+        done
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment: {DOMAIN: "${DOMAIN}"}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy:/data
+    depends_on: [api]
+    networks: [internal]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    volumes: [./prometheus.yml:/etc/prometheus/prometheus.yml:ro, prom:/prometheus]
+    networks: [internal]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment: {GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD}", GF_SERVER_ROOT_URL: "https://${DOMAIN}/grafana/", GF_SERVER_SERVE_FROM_SUB_PATH: "true"}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    networks: [internal]
+
+  clickhouse-backup:
+    image: altinity/clickhouse-backup:2.5.20
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
+      REMOTE_STORAGE: s3
+      S3_BUCKET: "${BACKUP_S3_BUCKET}"
+      S3_ENDPOINT: "${BACKUP_S3_ENDPOINT}"
+      S3_ACCESS_KEY: "${BACKUP_S3_ACCESS_KEY}"
+      S3_SECRET_KEY: "${BACKUP_S3_SECRET_KEY}"
+      BACKUPS_TO_KEEP_REMOTE: "14"
+    command: ["server"]
+    volumes: [ch:/var/lib/clickhouse]
+    networks: [internal]
+
+volumes: {pg: {}, redis: {}, ch: {}, data: {}, reports: {}, caddy: {}, prom: {}, grafana: {}}
+networks: {internal: {}}

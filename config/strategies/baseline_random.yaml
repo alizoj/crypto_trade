@@ -1,0 +1,54 @@
+# baseline_random — случайные входы, эталон P(pass) (раздел 6 ТЗ).
+# Решение на баре — детерминированный хэш (seed, hh_symbol, close_ts).
+name: baseline_random
+tf: 1h
+htf: 4h
+
+params:
+  signals_per_day: 1.0      # среднее число сигналов в сутки на символ
+  short_share: 0.5          # доля шортов среди сигналов
+  seed: 42
+  atr_len: 14
+  sl_atr: 1.5               # SL = sl_atr * ATR
+  rr: 1.0                   # TP = rr * SL-дистанция (один тейк)
+  score: 50
+  ema_htf_len: 200          # только для колонки скринера htf_trend
+  vwap_anchor: utc_day
+  max_hold_min: 1440
+  valid_min: 60
+  entry_type: market
+  tp1_frac: 1.0
+  sl_trigger: last
+
+groups:
+  crypto_major: {}
+  crypto_alt: {}
+  tradfi: {}
+
+search_space:
+  signals_per_day: [0.5, 1.0, 2.0]
+  sl_atr: [1.0, 1.5, 2.0]
+
+risk:
+  risk_per_trade: 0.10
+  abs_risk_cap_pct: 0.01
+  soft_daily_stop: 0.60
+  max_concurrent_positions: 3
+  max_correlated_exposure_pct: 0.02
+  flatten_before_reset: false
+  target_lock: true
+  target_lock_notional_usd: 100
+  min_notional_usd: 10
+
+execution:
+  exec_delay_min: [1, 10]
+  sl_tp_trigger: last
+  intrabar_resolution: sl_first
+  slippage_k_atr: 0.05
+  slippage_ref_notional_usd: 10000
+
+filters:
+  tradfi_off_session_signals: false
+  adx_filter: false
+  funding_oi_filter: false
+  cvd_divergence_filter: false

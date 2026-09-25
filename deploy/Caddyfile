@@ -1,0 +1,14 @@
+# HTTPS автоматически (Let's Encrypt). Наружу торчит только Caddy.
+{$DOMAIN} {
+	encode gzip zstd
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+	handle_path /grafana/* {
+		reverse_proxy grafana:3000
+	}
+	reverse_proxy api:8000
+}

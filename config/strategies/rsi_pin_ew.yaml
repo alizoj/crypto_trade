@@ -1,0 +1,84 @@
+# rsi_pin_ew — вход по тренду на откате: RSI + пинбар + волна Эллиотта (гипотеза для скрининга).
+# Логика и формализация волн — docstring quant/strategies/rsi_pin_ew.py.
+name: rsi_pin_ew
+tf: 1h
+htf: 4h
+
+params:
+  ema_htf_len: 200          # EMA на HTF (тренд)
+  htf_swing_left: 3
+  htf_swing_right: 3
+  atr_len: 14
+  rsi_len: 14
+  vwap_anchor: utc_day
+  # --- условия входа (use_* / ew_mode: off — условие выключено)
+  use_trend: true           # HTF-тренд по направлению сделки
+  use_rsi: true
+  rsi_long_max: 40          # лонг: за rsi_lookback баров RSI был <= 40 и сейчас растёт
+  rsi_short_min: 60
+  rsi_lookback: 5
+  use_pin: true
+  pin_wick: 0.6             # тень по направлению входа >= 60% диапазона свечи
+  pin_body: 0.35            # тело <= 35% диапазона
+  pin_min_atr: 0.5          # диапазон свечи >= 0.5 ATR
+  pin_lookback: 1           # пинбар на текущем баре (1) или за последние N баров
+  ew_mode: both             # off | w2 (вход в волну 3) | w4 (вход в волну 5) | both
+  ew_left: 5                # свинги зигзага: pivothigh/pivotlow(left, right)
+  ew_right: 2
+  w1_min_atr: 2.0           # волна 1 не меньше 2 ATR
+  w2_fib: [0.382, 0.786]    # откат волны 2 от волны 1
+  w4_fib: [0.236, 0.5]      # откат волны 4 от волны 3
+  w3_min_ratio: 1.0         # волна 3 не короче волны 1
+  edge_trigger: true        # сигнал только на первом баре выполнения условий
+  # --- план сделки: стоп за минимум отката с запасом, тейки в R
+  sl_buf_atr: 0.2
+  sl_min_atr: 0.5
+  sl_max_atr: 3.0           # стоп дальше 3 ATR — сигнала нет
+  tp1_r: 1.0
+  tp2_r: 2.0
+  tp1_frac: 0.5
+  max_hold_min: 2880
+  valid_min: 60
+  entry_type: market
+  sl_trigger: last
+  # --- контроль: entry_mode=random — те же уровни, случайные входы
+  entry_mode: setup
+  random_signals_per_day: 0.2
+  random_short_share: 0.5
+  seed: 42
+
+groups:
+  crypto_major: {}
+  crypto_alt: {}
+  tradfi: {}
+
+# Абляция условий: какой вклад даёт каждое (32 варианта)
+search_space:
+  use_trend: [true, false]
+  use_rsi: [true, false]
+  use_pin: [true, false]
+  ew_mode: ["off", w2, w4, both]
+
+risk:
+  risk_per_trade: 0.10
+  abs_risk_cap_pct: 0.01
+  soft_daily_stop: 0.60
+  max_concurrent_positions: 3
+  max_correlated_exposure_pct: 0.02
+  flatten_before_reset: false
+  target_lock: true
+  target_lock_notional_usd: 100
+  min_notional_usd: 10
+
+execution:
+  exec_delay_min: [1, 10]
+  sl_tp_trigger: last
+  intrabar_resolution: sl_first
+  slippage_k_atr: 0.05
+  slippage_ref_notional_usd: 10000
+
+filters:
+  tradfi_off_session_signals: false
+  adx_filter: false
+  funding_oi_filter: false
+  cvd_divergence_filter: false

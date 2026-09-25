@@ -1,0 +1,95 @@
+# confluence_v1 — конфлюенс-движок входов (раздел 6 ТЗ). Собственная реализация по описанию ТЗ,
+# Pine-исходника нет. Логика скора — docstring quant/strategies/confluence_v1.py.
+name: confluence_v1
+tf: 1h
+htf: 4h
+
+params:
+  # --- индикаторы
+  ema_htf_len: 200          # EMA на HTF (тренд)
+  htf_swing_left: 3         # пивоты HTF для структуры HH/HL
+  htf_swing_right: 3
+  swing_left: 5             # пивоты ТФ: BOS/CHoCH, sweep, якорь AVWAP
+  swing_right: 2            # подтверждение свинга через right баров
+  rsi_len: 14               # RSI Wilder (RMA)
+  atr_len: 14
+  adx_len: 14
+  rvol_len: 20
+  cvd_len: 24               # окно CVD-тренда и CVD-дивергенции, баров
+  cvd_thr: 0.05             # |Σdelta / Σvolume| для cvd_trend
+  div_left: 5               # пивоты RSI для дивергенций
+  div_right: 2
+  div_range: [5, 60]        # расстояние между пивотами (как в индикаторе TradingView)
+  vwap_anchor: utc_day      # utc_day | prop_day (20:00 UTC)
+  # --- «свежесть» событий, баров ТФ
+  structure_lookback: 6
+  sweep_lookback: 3
+  div_lookback: 3
+  # --- веса компонентов (score = 100 * Σ вес*доля / Σ весов)
+  weights: {htf: 25, structure: 20, sweep: 10, rsi: 10, divergence: 10, volume: 10, vwap: 15}
+  rsi_mid_long: 60          # лонг: RSI растёт и <= 60 — полный балл
+  rsi_mid_short: 40         # шорт: RSI падает и >= 40 — полный балл
+  rsi_ob: 70
+  rsi_os: 30
+  rvol_min: 1.5             # RVOL, дающий полный объёмный балл
+  vwap_near_atr: 1.0        # «откат к AVWAP» — ближе 1 ATR
+  # --- пороги фильтров (включение — секция filters)
+  adx_min: 20
+  funding_hot: 0.0005       # 0.05% за период funding
+  oi_lookback_h: 24
+  oi_hot_pct: 15.0          # рост OI, % за oi_lookback_h
+  edge_trigger: true        # сигнал только на первом баре выполнения условий
+  # --- стороны: у шорта шире ATR-стоп и быстрее тейк, шорт — только при медвежьем HTF
+  long:  {threshold: 65, sl_atr: 1.5, tp1_r: 1.0, tp2_r: 2.0, require_htf_bull: false}
+  short: {threshold: 65, sl_atr: 2.0, tp1_r: 0.8, tp2_r: 1.5, require_htf_bear: true}
+  # --- план сделки
+  max_hold_min: 1440
+  valid_min: 60
+  entry_type: market
+  tp1_frac: 0.5
+  sl_trigger: last
+
+# Переопределения по группам (параметры оптимизируются пулом по группе, правило 3.1.7)
+groups:
+  crypto_major: {}
+  crypto_alt: {}
+  tradfi: {}
+
+# Пространство поиска оптимизатора: dotted path → значения (4–6 параметров)
+search_space:
+  long.threshold: [60, 65, 70, 75]
+  short.threshold: [60, 65, 70, 75]
+  long.sl_atr: [1.0, 1.5, 2.0]
+  short.sl_atr: [1.5, 2.0, 2.5]
+  long.tp2_r: [1.5, 2.0, 3.0]
+
+risk:
+  risk_per_trade: 0.10
+  abs_risk_cap_pct: 0.01
+  soft_daily_stop: 0.60
+  max_concurrent_positions: 3
+  max_correlated_exposure_pct: 0.02
+  flatten_before_reset: false
+  target_lock: true
+  target_lock_notional_usd: 100
+  min_notional_usd: 10
+
+execution:
+  exec_delay_min: [1, 10]
+  sl_tp_trigger: last
+  intrabar_resolution: sl_first
+  slippage_k_atr: 0.05
+  slippage_ref_notional_usd: 10000
+
+filters:
+  tradfi_off_session_signals: false
+  adx_filter: false
+  funding_oi_filter: false
+  cvd_divergence_filter: false
+
+# Создание live-сигнала (раздел 8.2): только при откалиброванной вероятности
+live:
+  min_prob: 0.50
+  min_ev_r: 0.10
+  min_n: 100
+  require_calibration: true
