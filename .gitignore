@@ -8,7 +8,7 @@ htmlcov/
 *.egg-info/
 
 # Данные и артефакты (источник истины — архив на диске/S3, не git)
-data/
+/data/
 reports_out/
 *.db
 *.db-journal
