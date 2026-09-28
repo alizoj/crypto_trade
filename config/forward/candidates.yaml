@@ -44,3 +44,18 @@ candidates:
     control: {entry_mode: random, random_signals_per_day: 0.13, random_short_share: 1.0, rules_long: [],
               rules_short: [[cvd_ratio, "<=", -0.062], [ema200_dist_atr, "<", 0]], breadth_min_frac: 0.0}
     criterion: setup_gt_control_and_positive
+
+  - name: D1 trend majors
+    note: >-
+      Зарегистрирован 2026-09-28 (данных после 2026-09-24 до регистрации не видел). Классическое следование за
+      трендом на дневках из книг (Акелис: цена пересекает дневную скользящую; Элдер/Дуглас: режь убытки, давай
+      прибыли течь): лонг мейджора, когда close выше дневной EMA50 впервые за 24 часа, шорт — зеркально; стоп
+      2 дневных ATR, цель 3R, удержание до 30 дней. Движок: 2022-04..2025 +0.114R (контроль +0.051), 2025..2026-03
+      +0.196R (+0.037), 2026-03..09 +0.270R (+0.033) — везде выше контроля, но t 1.0–1.5 (не значимо); в протоколе
+      книжных гипотез это была справочная ветка A1, а не выбранный вариант.
+    strategy: feature_rules
+    groups: [crypto_major]
+    setup: {rules_long: [[d1_ema50_dist_pct, ">", 0]], rules_short: [[d1_ema50_dist_pct, "<", 0]], rearm_bars: 24,
+            sl_mode: d1_atr, sl_atr: 2.0, tp_r: 3.0, max_hold_min: 43200, breadth_min_frac: 0.0}
+    control: {entry_mode: random, random_signals_per_day: 0.077, random_short_share: 0.5}
+    criterion: setup_gt_control_and_positive

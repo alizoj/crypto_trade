@@ -13,11 +13,11 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from quant.indicators import core
+from quant.indicators import core, elder
 from quant.indicators.pivots import pivothigh, pivotlow
 from quant.indicators.structure import market_structure
 from quant.strategies.common import (
-    bar_flags, btc_trend_asof, funding_asof, htf_block, htf_frame, indicator_block, ms, oi_change_pct,
+    asof_idx, bar_flags, btc_trend_asof, funding_asof, htf_block, htf_frame, indicator_block, ms, oi_change_pct,
     prepare_bars, prop_boundary_min,
 )
 
@@ -29,7 +29,15 @@ FEATURES = (
     "bb_pctb", "bb_width_pct", "body_ratio", "upper_wick", "lower_wick", "range_atr",
     "pin_bull", "pin_bear", "ew_w2_long", "ew_w4_long", "ew_w2_short", "ew_w4_short",
     "funding_rate", "oi_chg24_pct", "btc_trend", "hour", "dow",
+    # из книг (docs/Books): Элдер — индекс силы, MACD-гистограмма, импульс, тройной экран, термометр, SafeZone;
+    # ложный пробой («вынос стопов», Лекси/Элдер/Акелис); дневной тренд (Дуглас: тренд старшего ТФ + откат)
+    "fi2n", "fi2n_prev", "fi13n", "macdh_atr", "macdh_chg", "ema13_slope_atr", "impulse", "impulse_prev",
+    "htf_ema26_slope_pct", "htf_impulse", "d1_ema26_slope_pct", "d1_ema50_dist_pct", "d1_atr_pct",
+    "brk_prev_high", "brk_prev_low", "sweep_low24", "sweep_high24", "sweep_low48", "sweep_high48",
+    "sweep_low168", "sweep_high168", "thermo_ratio", "sz_long_atr", "sz_short_atr",
 )
+# признаки, которым нужна длинная история (дневные EMA) — стратегии берут окно побольше
+SLOW_FEATURES = frozenset({"ema200_dist_atr", "d1_ema26_slope_pct", "d1_ema50_dist_pct", "d1_atr_pct"})
 OPS = {"<": operator.lt, "<=": operator.le, ">": operator.gt, ">=": operator.ge, "==": operator.eq}
 
 
@@ -53,7 +61,77 @@ def rules_mask(f: dict[str, np.ndarray], rules: list, n: int) -> np.ndarray:
 DEFAULTS: dict[str, Any] = {"ema_htf_len": 200, "htf_swing_left": 3, "htf_swing_right": 3, "atr_len": 14,
                             "vwap_anchor": "utc_day", "pin_wick": 0.6, "pin_body": 0.35, "pin_min_atr": 0.5,
                             "ew_left": 5, "ew_right": 2, "w1_min_atr": 2.0, "w2_fib": [0.382, 0.786],
-                            "w4_fib": [0.236, 0.5], "w3_min_ratio": 1.0}
+                            "w4_fib": [0.236, 0.5], "w3_min_ratio": 1.0,
+                            "safezone_lookback": 10, "safezone_k": 2.5}
+
+
+def _htf_elder(hdf: pl.DataFrame | None, close_ms: np.ndarray) -> dict[str, np.ndarray]:
+    """Элдер на старшем ТФ (первый экран): наклон EMA26 в %, импульс и отставание EMA50 — по последнему
+    закрытому бару старшего ТФ (close_ms бара HTF <= close_ts)."""
+    n = len(close_ms)
+    out = {"slope26": np.full(n, np.nan), "impulse": np.full(n, np.nan), "ema50_dist": np.full(n, np.nan),
+           "atr_pct": np.full(n, np.nan)}
+    if hdf is None or hdf.is_empty():
+        return out
+    hc = hdf["close"].cast(pl.Float64).to_numpy()
+    hh = hdf["high"].cast(pl.Float64).to_numpy()
+    hl = hdf["low"].cast(pl.Float64).to_numpy()
+    e26, e50 = core.ema(hc, 26), core.ema(hc, 50)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        slope = (e26 / core.shift(e26, 1) - 1.0) * 100.0
+        dist50 = (hc / e50 - 1.0) * 100.0
+        atr_pct = core.atr(hh, hl, hc, 14) / hc * 100.0
+    imp = elder.impulse(hc).astype(np.float64)
+    idx = asof_idx(hdf["close_ms"].to_numpy().astype(np.int64), close_ms)
+    ok = idx >= 0
+    j = np.where(ok, idx, 0)
+    for key, arr in (("slope26", slope), ("impulse", imp), ("ema50_dist", dist50), ("atr_pct", atr_pct)):
+        out[key] = np.where(ok, arr[j], np.nan)
+    return out
+
+
+def book_features(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, v: np.ndarray, atr: np.ndarray,
+                  close_ms: np.ndarray, htf: pl.DataFrame | None, d1: pl.DataFrame | None,
+                  p: dict[str, Any]) -> dict[str, np.ndarray]:
+    """Признаки из книг (docs/Books), все в единицах ATR/процентах, чтобы сравнивать инструменты.
+
+    fi2n/fi13n — EMA(2)/EMA(13) индекса силы, делённого на ATR × средний объём 20 баров (Элдер: EMA(2) < 0
+    в восходящем тренде — откат для покупки); macdh_* — гистограмма MACD и её приращение; impulse — импульсная
+    система (+1 зелёный / −1 красный / 0); htf_* — первый экран на старшем ТФ; d1_* — дневной тренд;
+    brk_prev_* — закрытие за экстремумом предыдущего бара (третий экран: вход на пробое вчерашнего хая);
+    sweep_lowN — прокол минимума N прошлых баров с закрытием обратно выше него (ложный пробой), highN — зеркально;
+    thermo_ratio — термометр / его EMA(22); sz_*_atr — расстояние от close до стопа SafeZone в ATR.
+    """
+    f: dict[str, np.ndarray] = {}
+    with np.errstate(invalid="ignore", divide="ignore"):
+        vavg = core.sma(v, 20)
+        fin = elder.force_index(c, v) / (atr * vavg)
+        f["fi2n"] = core.ema(fin, 2)
+        f["fi2n_prev"] = core.shift(f["fi2n"], 1)
+        f["fi13n"] = core.ema(fin, 13)
+        mh = elder.macd_hist(c)
+        f["macdh_atr"] = mh / atr
+        f["macdh_chg"] = core.change(mh, 1) / atr
+        f["ema13_slope_atr"] = core.change(core.ema(c, 13), 1) / atr
+        imp = elder.impulse(c).astype(np.float64)
+        f["impulse"] = imp
+        f["impulse_prev"] = core.shift(imp, 1)
+        hb, db = _htf_elder(htf, close_ms), _htf_elder(d1, close_ms)
+        f["htf_ema26_slope_pct"], f["htf_impulse"] = hb["slope26"], hb["impulse"]
+        f["d1_ema26_slope_pct"], f["d1_ema50_dist_pct"], f["d1_atr_pct"] = db["slope26"], db["ema50_dist"], db["atr_pct"]
+        f["brk_prev_high"] = (c > core.shift(h, 1)).astype(np.float64)
+        f["brk_prev_low"] = (c < core.shift(lo, 1)).astype(np.float64)
+        for n in (24, 48, 168):
+            prior_lo = core.shift(core.lowest(lo, n), 1)
+            prior_hi = core.shift(core.highest(h, n), 1)
+            f[f"sweep_low{n}"] = ((lo < prior_lo) & (c > prior_lo)).astype(np.float64)
+            f[f"sweep_high{n}"] = ((h > prior_hi) & (c < prior_hi)).astype(np.float64)
+        t = elder.thermometer(h, lo)
+        f["thermo_ratio"] = t / core.ema(t, 22)
+        sl_l, sl_s = elder.safezone_stops(h, lo, int(p["safezone_lookback"]), float(p["safezone_k"]))
+        f["sz_long_atr"] = (c - sl_l) / atr
+        f["sz_short_atr"] = (sl_s - c) / atr
+    return f
 
 
 def bar_features(bars_tf: pl.DataFrame, *, tf: str, htf_tf: str = "4h", htf: pl.DataFrame | None = None,
@@ -83,8 +161,8 @@ def bar_features(bars_tf: pl.DataFrame, *, tf: str, htf_tf: str = "4h", htf: pl.
 
     ind = indicator_block(h, lo, c, v, tb, ts_ms, p, prop_boundary_min(getattr(inst, "market", "crypto_tradfi")))
     atr = ind["atr"]
-    hb = htf_block(htf_frame(htf, bars_1m, df, htf_tf), close_ms, int(p["ema_htf_len"]), int(p["htf_swing_left"]),
-                   int(p["htf_swing_right"]))
+    hdf = htf_frame(htf, bars_1m, df, htf_tf)
+    hb = htf_block(hdf, close_ms, int(p["ema_htf_len"]), int(p["htf_swing_left"]), int(p["htf_swing_right"]))
     st = market_structure(h, lo, c, 5, 2)
     _, ph_idx = pivothigh(h, int(p["ew_left"]), int(p["ew_right"]))
     _, pl_idx = pivotlow(lo, int(p["ew_left"]), int(p["ew_right"]))
@@ -133,7 +211,9 @@ def bar_features(bars_tf: pl.DataFrame, *, tf: str, htf_tf: str = "4h", htf: pl.
         f["btc_trend"] = btc_trend_asof(meta.get("btc_trend"), close_ms)
         f["hour"] = ((close_ms // 3_600_000) % 24).astype(np.float64)
         f["dow"] = (((close_ms // 86_400_000) + 3) % 7).astype(np.float64)      # 0 = понедельник
+        f.update(book_features(o, h, lo, c, v, atr, close_ms, hdf, htf_frame(None, None, df, "1d"), p))
     f["_atr"] = atr
+    f["_high"], f["_low"] = h, lo
     f["_close"] = c
     f["_close_ms"] = close_ms.astype(np.float64)
     return df, live, f

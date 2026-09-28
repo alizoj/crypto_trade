@@ -4,7 +4,11 @@
 сторона выключена). Признаки — quant.research.features (тот же расчёт, что при разметке истории).
 Сигнал — на первом баре, где правила выполнены, если в предыдущие rearm_bars баров они не выполнялись
 (один вход на эпизод; конечная память — расчёт на окне совпадает с полным).
-Выходы: стоп sl_atr·ATR, одна цель tp_r·R, удержание max_hold_min.
+Выходы: стоп, цель tp_r·R, удержание max_hold_min. Стоп (sl_mode): atr — sl_atr·ATR от close; d1_atr — sl_atr
+дневных ATR; safezone — стоп SafeZone Элдера; bar — за экстремум сигнального бара ± sl_buffer_atr·ATR (ложный
+пробой). Для safezone/bar расстояние ограничено [sl_min_atr, sl_max_atr]·ATR. Частичная фиксация (Дуглас):
+tp2_r задан — доля tp1_frac закрывается на tp_r, остаток на tp2_r; be_after_tp1 — стоп остатка в безубыток после
+первой цели.
 
 entry_mode = random — контроль: те же выходы, случайные входы (частота random_signals_per_day,
 доля шортов random_short_share).
@@ -36,7 +40,14 @@ DEFAULTS: dict[str, Any] = {
     "rules_short": [],
     "rearm_bars": 24,
     "sl_atr": 1.5,
+    "sl_mode": "atr",
+    "sl_min_atr": 0.5,
+    "sl_max_atr": 3.0,
+    "sl_buffer_atr": 0.2,
     "tp_r": 2.0,
+    "tp2_r": None,
+    "tp1_frac": 1.0,
+    "be_after_tp1": None,       # None — как в execution конфига
     "max_hold_min": 2880,
     "valid_min": 60,
     "entry_type": "market",
@@ -50,6 +61,26 @@ DEFAULTS: dict[str, Any] = {
     "breadth_rules_short": None,
     "filters": {"tradfi_off_session_signals": False},
 }
+
+
+SL_MODES = ("atr", "safezone", "bar", "d1_atr")
+
+
+def stop_distance(p: dict[str, Any], f: dict[str, np.ndarray], side: str) -> np.ndarray:
+    """Расстояние от close до стопа (в цене) по sl_mode; NaN — стоп не определён (сигнала не будет)."""
+    c, atr = f["_close"], f["_atr"]
+    mode = p["sl_mode"]
+    if mode == "atr":
+        return float(p["sl_atr"]) * atr
+    if mode == "d1_atr":                           # дневной масштаб: sl_atr дневных ATR (без ограничения в 1h-ATR)
+        return float(p["sl_atr"]) * f["d1_atr_pct"] / 100.0 * c
+    with np.errstate(invalid="ignore"):
+        if mode == "safezone":
+            d = f[f"sz_{side}_atr"] * atr
+        else:                                      # bar: за экстремум сигнального бара
+            buf = float(p["sl_buffer_atr"]) * atr
+            d = (c - f["_low"] + buf) if side == "long" else (f["_high"] - c + buf)
+        return np.clip(d, float(p["sl_min_atr"]) * atr, float(p["sl_max_atr"]) * atr)
 
 
 def breadth_rules(params: dict[str, Any], side: str) -> list:
@@ -84,11 +115,15 @@ class FeatureRules(NullSafeSignals, Strategy):
             check_rules(breadth_rules(self.params, side), "feature_rules.breadth")
         if self.params["entry_mode"] not in ("setup", "random"):
             raise ValueError(f"feature_rules: entry_mode {self.params['entry_mode']!r}")
+        if self.params["sl_mode"] not in SL_MODES:
+            raise ValueError(f"feature_rules: sl_mode {self.params['sl_mode']!r}, есть {SL_MODES}")
 
     def warmup_bars(self) -> int:
         """Окно баров ТФ для on_bar: EMA200 1h сходится за ~25×200 баров, остальное — за 600."""
+        from quant.research.features import SLOW_FEATURES
+
         used = {r[0] for side in ("long", "short") for r in self.params[f"rules_{side}"]}
-        slow = {"ema200_dist_atr"} & used
+        slow = SLOW_FEATURES & used
         return max(5000 if slow else 600, 168 + int(self.params["rearm_bars"]))
 
     def compute(self, bars_tf: pl.DataFrame, *, hh_symbol: str, tf: str, htf: pl.DataFrame | None = None,
@@ -128,16 +163,18 @@ class FeatureRules(NullSafeSignals, Strategy):
                 conds = {"long": fire & is_long, "short": fire & ~is_long}
                 if min_frac > 0:
                     conds = {s: conds[s] & (breadth[s] >= min_frac) for s in conds}
-            dist = float(p["sl_atr"]) * atr
             cols: dict[str, np.ndarray] = {"close": c}
             for side in ("long", "short"):
                 cols[f"score_{side}"] = np.where(ready, 100.0 * hits[side], np.nan)
-            cols["signal_long"], cols["signal_short"] = conds["long"], conds["short"]
+            tp2_r = p.get("tp2_r")
             for side, sgn in (("long", 1.0), ("short", -1.0)):
+                dist = stop_distance(p, f, side)
+                conds[side] &= ~np.isnan(dist) & (dist > 0)
                 cols[f"entry_{side}"] = np.where(ready, c, np.nan)
                 cols[f"sl_{side}"] = c - sgn * dist
                 cols[f"tp1_{side}"] = c + sgn * float(p["tp_r"]) * dist
-                cols[f"tp2_{side}"] = np.full(n, np.nan)
+                cols[f"tp2_{side}"] = c + sgn * float(tp2_r) * dist if tp2_r else np.full(n, np.nan)
+            cols["signal_long"], cols["signal_short"] = conds["long"], conds["short"]
             for side in ("long", "short"):
                 cols[f"c_rules_{side}"] = np.where(ready, 100.0 * hits[side], np.nan)
             cols.update({

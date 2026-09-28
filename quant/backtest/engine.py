@@ -109,6 +109,8 @@ def build_tradeset(spec: BuildSpec, *, cfg: ChallengeConfig | None = None,
     exec_p = ExecParams.from_config(scfg.get("execution"), **spec.exec_overrides)
     insts = [I.get(s) for s in spec.symbols]
     base_params = with_overrides(load_params(spec.strategy, None), spec.overrides)
+    if base_params.get("be_after_tp1") is not None and "be_after_tp1" not in spec.exec_overrides:
+        exec_p.be_after_tp1 = bool(base_params["be_after_tp1"])      # стратегия задаёт безубыток после TP1 сама
     use_breadth = float(base_params.get("breadth_min_frac") or 0.0) > 0
     need_btc = spec.strategy != "baseline_random" and (use_breadth or any(i.group != "crypto_major" for i in insts))
     btc = _btc_trend(spec.strategy, spec.start - timedelta(days=WARMUP_DAYS), spec.end) if need_btc else None
