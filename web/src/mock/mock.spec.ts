@@ -1,6 +1,17 @@
 // Фикстуры mock-режима: объём и разнообразие данных, соответствие контракту.
 import { beforeAll, describe, expect, it } from 'vitest'
-import type { Account, BacktestRun, BarsResponse, Instrument, ScreenerResponse, SignalsResponse, AnalysisResponse } from '@/api/types'
+import type {
+  Account,
+  AnalysisResponse,
+  BacktestRun,
+  BarsResponse,
+  Instrument,
+  JournalResponse,
+  JournalStats,
+  JournalTrade,
+  ScreenerResponse,
+  SignalsResponse,
+} from '@/api/types'
 import { handle, setMockCalibrationStale, setMockSession } from './server'
 
 function call<T>(method: string, url: string, body?: unknown): { status: number; body: T } {
@@ -144,5 +155,78 @@ describe('mock: фикстуры', () => {
     expect(rep.contentType).toContain('text/html')
     expect(String(rep.body)).toContain('<html')
     expect(call<{ total: number }>('GET', '/api/trials?limit=10').body.total).toBeGreaterThan(50)
+  })
+})
+
+describe('mock: журнал сделок и правило 6%', () => {
+  beforeAll(() => setMockSession('tester'))
+
+  it('история: серия 1 из 20 завершена, серия 2 идёт; есть нарушения дисциплины', () => {
+    const accs = call<Account[]>('GET', '/api/accounts').body
+    const a = accs[0]!
+    const st = call<JournalStats>('GET', `/api/journal/stats?account_id=${a.id}`).body
+    expect(st.series_size).toBe(20)
+    expect(st.series).toHaveLength(2)
+    expect(st.series[0]!.complete).toBe(true)
+    expect(st.series[0]!.n).toBe(20)
+    expect(st.series[1]!.complete).toBe(false)
+    expect(st.total.n).toBeGreaterThanOrEqual(27)
+    expect(st.total.stop_breaches).toBeGreaterThanOrEqual(1)
+    expect(st.total.without_stop).toBeGreaterThanOrEqual(1)
+    expect(st.total.from_signals).toBeGreaterThan(0)
+    const all = call<JournalResponse>('GET', '/api/journal?limit=500').body
+    expect(all.total).toBeGreaterThanOrEqual(35)
+    for (let i = 1; i < all.items.length; i++) expect(all.items[i - 1]!.closed_at >= all.items[i]!.closed_at).toBe(true)
+    for (const t of all.items) {
+      if (t.risk_usd) expect(t.r_multiple).toBeCloseTo(t.pnl_usd / t.risk_usd, 3)
+      else expect(t.r_multiple).toBeNull()
+    }
+  })
+
+  it('закрытие позиции пишет сделку с причиной и заметкой; заметку можно править', () => {
+    const a = call<Account[]>('GET', '/api/accounts').body[0]!
+    const pos = a.positions[0]!
+    const before = call<JournalResponse>('GET', `/api/journal?account_id=${a.id}`).body.total
+    expect(call('DELETE', `/api/accounts/${a.id}/positions/${pos.id}?exit_price=${pos.entry_price}&reason=bad`).status).toBe(422)
+    const res = call<Account>('DELETE', `/api/accounts/${a.id}/positions/${pos.id}?exit_price=${pos.entry_price}&reason=tp&note=по плану`)
+    expect(res.status).toBe(200)
+    const j = call<JournalResponse>('GET', `/api/journal?account_id=${a.id}`).body
+    expect(j.total).toBe(before + 1)
+    const t = j.items[0]!
+    expect(t.exit_reason).toBe('tp')
+    expect(t.note).toBe('по плану')
+    expect(t.pnl_usd).toBeLessThan(0) // выход по цене входа — минус комиссии
+    const upd = call<JournalTrade>('PATCH', `/api/journal/${t.id}`, { note: 'рано вышел', exit_reason: 'manual' }).body
+    expect(upd.note).toBe('рано вышел')
+    expect(upd.exit_reason).toBe('manual')
+    expect(call('PATCH', `/api/journal/${t.id}`, { exit_reason: 'x' }).status).toBe(422)
+    expect(call('PATCH', '/api/journal/99999', { note: '?' }).status).toBe(404)
+  })
+
+  it('месяц: результат от старта месяца, риск открытых; при исчерпании — план заблокирован', () => {
+    const acc = call<Account>('POST', '/api/accounts', { name: 'M', challenge_type: 'two_stage', size: 10000 }).body
+    expect(acc.month?.enabled).toBe(true)
+    expect(acc.month?.start_balance).toBe(10000)
+    expect(acc.month?.limit_usd).toBe(600)
+    const withPos = call<Account>('POST', `/api/accounts/${acc.id}/positions`, {
+      hh_symbol: 'BTCUSDT',
+      side: 'long',
+      qty: 5,
+      entry_price: 1000,
+      sl: 900,
+    }).body
+    expect(withPos.month?.open_risk_usd).toBe(500)
+    // убыток месяца 150$ (дневной soft stop не задет) + риск открытой 500$ ≥ 600$
+    const hit = call<Account>('PATCH', `/api/accounts/${acc.id}`, { balance: 9850 }).body
+    expect(hit.month?.result_usd).toBe(-150)
+    expect(hit.month?.used_usd).toBe(650)
+    expect(hit.month?.blocked).toBe(true)
+    expect(hit.soft_stop_hit).toBe(false)
+    const row = call<ScreenerResponse>('GET', '/api/screener?tf=1h').body.rows.find((r) => r.status === 'signal')!
+    const an = call<AnalysisResponse>('GET', `/api/instruments/${row.hh_symbol}/analysis?tf=1h&account_id=${acc.id}`).body
+    const side = row.active_signal_side === 'short' ? an.short : an.long
+    expect(side.plan?.blocked_reason ?? '').toContain('6%')
+    call('DELETE', `/api/accounts/${acc.id}`)
+    expect(call<JournalResponse>('GET', `/api/journal?account_id=${acc.id}`).body.total).toBe(0)
   })
 })

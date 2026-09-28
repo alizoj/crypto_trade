@@ -212,6 +212,18 @@ interface Account {
   status: "active" | "passed" | "failed";
   positions: Position[];
   updated_at: string;
+  month: MonthStatus | null;
+}
+// Правило 6% Элдера: убыток с начала месяца + риск открытых позиций <= limit_pct баланса на начало месяца.
+// Месяц — по проп-календарю (день начинается в 00:00 UTC+4). При blocked план сделки не даёт входа.
+interface MonthStatus {
+  month: string;                 // "YYYY-MM"
+  start_balance: number;
+  result_usd: number;            // баланс − баланс на начало месяца (с комиссиями и ручными правками)
+  open_risk_usd: number;         // до стопов открытых позиций; без стопа — текущий нереализованный убыток
+  limit_pct: number; limit_usd: number; used_usd: number;
+  room_usd: number | null;       // null — правило выключено (limit_pct = 0)
+  enabled: boolean; blocked: boolean;
 }
 interface Position {
   id: number; hh_symbol: string; side: Side; qty: number; entry_price: number;
@@ -225,7 +237,46 @@ interface Position {
 | PATCH | `/api/accounts/{id}` | `{name?, balance?, stage?, status?}` | `Account` |
 | DELETE | `/api/accounts/{id}` | — | `{ok: true}` |
 | POST | `/api/accounts/{id}/positions` | `{hh_symbol, side, qty, entry_price, sl?, tp?, signal_id?}` | `Account` |
-| DELETE | `/api/accounts/{id}/positions/{pos_id}?exit_price=` | — | `Account` |
+| DELETE | `/api/accounts/{id}/positions/{pos_id}?exit_price=&reason=&note=` | — | `Account` |
+
+Закрытие позиции пишет сделку в журнал; `reason` — `manual` (по умолчанию) | `sl` | `tp` | `timeout` | `other`,
+`note` — заметка (дневник трейдера).
+
+## Журнал сделок (экран 6)
+
+Элдер: таблица всех сделок и дневник; Дуглас: оценка сериями по 20 сделок и наблюдение за своими ошибками.
+```ts
+interface JournalTrade {
+  id: number; account_id: number; hh_symbol: string; side: Side; qty: number;
+  entry_price: number; exit_price: number; sl: number | null; tp: number | null;
+  opened_at: string; closed_at: string; signal_id: number | null; strategy: string;
+  fees_usd: number;
+  pnl_usd: number;               // за вычетом комиссий входа и выхода
+  risk_usd: number | null;       // qty × |вход − SL|; нет стопа — null
+  r_multiple: number | null;     // pnl_usd / risk_usd
+  exit_reason: "manual" | "sl" | "tp" | "timeout" | "other";
+  note: string;
+}
+interface JournalBlock {         // серия из 20 сделок или весь журнал
+  n: number; wins: number; win_rate: number | null; pnl_usd: number; fees_usd: number;
+  n_r: number; sum_r: number | null; avg_r: number | null; avg_win_r: number | null; avg_loss_r: number | null;
+  profit_factor: number | null; max_loss_streak: number;
+  expected_avg_r: number | null; n_expected: number;   // ev_r сигналов, по которым открыты сделки
+  from_signals: number; without_stop: number;
+  stop_breaches: number;         // убыток больше 1.1R — стоп не соблюдён
+  first_closed_at: string | null; last_closed_at: string | null;
+}
+interface JournalStats {
+  series_size: number;           // 20
+  total: JournalBlock;
+  series: (JournalBlock & { index: number; complete: boolean })[];   // по порядку закрытия
+}
+```
+| Метод | Путь | Тело | Ответ |
+|---|---|---|---|
+| GET | `/api/journal?account_id=&from=&to=&limit=100&offset=0` | — | `{total, items: JournalTrade[]}` (новые сверху) |
+| GET | `/api/journal/stats?account_id=&from=&to=` | — | `JournalStats` |
+| PATCH | `/api/journal/{id}` | `{note?, exit_reason?}` | `JournalTrade` |
 
 ## Бэктесты (экран 5)
 

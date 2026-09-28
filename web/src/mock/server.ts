@@ -3,6 +3,9 @@ import type {
   AccountCreate,
   AccountPatch,
   AnalysisResponse,
+  ExitReason,
+  JournalPatch,
+  JournalQuery,
   Meta,
   PositionCreate,
   ScreenerResponse,
@@ -25,7 +28,9 @@ import {
   markersFor,
   replaceAccount,
   reportHtml,
+  signalEv,
 } from './data'
+import { EXIT_REASONS, dropAccountTrades, journalStats, listJournal, patchJournal } from './journal'
 import { resetState } from '@/utils/reset'
 
 export interface MockRequest {
@@ -252,6 +257,7 @@ export function handle(req: MockRequest): MockResponse {
     }
     if (!isPositions && method === 'DELETE') {
       d.accounts = d.accounts.filter((a) => a.id !== id)
+      dropAccountTrades(id)
       return json({ ok: true })
     }
     if (isPositions && !m[2] && method === 'POST') {
@@ -266,10 +272,34 @@ export function handle(req: MockRequest): MockResponse {
     }
     if (isPositions && m[2] && method === 'DELETE') {
       const exit = query.get('exit_price')
-      const res = closePosition(acc, Number(m[2]), exit ? Number(exit) : undefined)
+      const reason = (query.get('reason') ?? 'manual') as ExitReason
+      if (!EXIT_REASONS.includes(reason)) return err(422, `reason: одно из ${EXIT_REASONS.join(', ')}`)
+      const res = closePosition(acc, Number(m[2]), exit ? Number(exit) : undefined, reason, query.get('note') ?? '')
       if (!res) return err(404, 'позиция не найдена')
       return json(res)
     }
+  }
+
+  // --- журнал сделок ---
+  if ((path === '/api/journal' || path === '/api/journal/stats') && method === 'GET') {
+    const acc = query.get('account_id')
+    const q: JournalQuery = {
+      account_id: acc ? Number(acc) : null,
+      from: query.get('from') ?? undefined,
+      to: query.get('to') ?? undefined,
+      limit: Math.min(1000, Math.max(1, Number(query.get('limit') ?? 100) || 100)),
+      offset: Math.max(0, Number(query.get('offset') ?? 0) || 0),
+    }
+    return json(path === '/api/journal' ? listJournal(q) : journalStats(q, signalEv))
+  }
+  m = /^\/api\/journal\/(\d+)$/.exec(path)
+  if (m && method === 'PATCH') {
+    const b = body as JournalPatch
+    if (b.exit_reason !== undefined && !EXIT_REASONS.includes(b.exit_reason)) {
+      return err(422, `exit_reason: одно из ${EXIT_REASONS.join(', ')}`)
+    }
+    const t = patchJournal(Number(m[1]), b)
+    return t ? json(t) : err(404, 'нет сделки')
   }
 
   // --- бэктесты ---

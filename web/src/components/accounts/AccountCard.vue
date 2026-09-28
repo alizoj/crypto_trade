@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { Account, AccountStatus, PositionCreate, Stage } from '@/api/types'
+import type { Account, AccountStatus, ExitReason, PositionCreate, Stage } from '@/api/types'
 import { errorMessage } from '@/api/client'
 import { useAccountsStore } from '@/stores/accounts'
 import { usePrefsStore } from '@/stores/prefs'
 import RoomBar from '@/components/RoomBar.vue'
 import PositionForm from './PositionForm.vue'
-import { fmtDateTime, fmtNum, fmtPct, fmtPrice, fmtQty, fmtUsd } from '@/utils/format'
+import { fmtDateTime, fmtNum, fmtPct, fmtPrice, fmtQty, fmtShare, fmtUsd } from '@/utils/format'
 import { signClass } from '@/utils/colors'
-import { ACCOUNT_STATUS_RU, CHALLENGE_RU, SIDE_RU, STAGE_RU } from '@/utils/labels'
+import { ACCOUNT_STATUS_RU, CHALLENGE_RU, EXIT_REASON_RU, SIDE_RU, STAGE_RU } from '@/utils/labels'
 
 const props = defineProps<{ account: Account }>()
 
@@ -24,6 +24,9 @@ const balanceInput = ref('')
 const showPosForm = ref(false)
 const closingId = ref<number | null>(null)
 const exitInput = ref('')
+const exitReason = ref<ExitReason>('manual')
+const exitNote = ref('')
+const EXIT_REASONS = Object.keys(EXIT_REASON_RU) as ExitReason[]
 const confirmDelete = ref(false)
 
 const unrealized = computed(() => a.value.equity - a.value.balance)
@@ -73,6 +76,8 @@ async function addPosition(body: PositionCreate): Promise<void> {
 function startClose(posId: number, mark: number | null): void {
   closingId.value = posId
   exitInput.value = mark === null ? '' : String(mark)
+  exitReason.value = 'manual'
+  exitNote.value = ''
 }
 
 async function confirmClose(): Promise<void> {
@@ -84,7 +89,7 @@ async function confirmClose(): Promise<void> {
     return
   }
   const id = closingId.value
-  if (await run(() => accounts.closePosition(a.value.id, id, exit))) closingId.value = null
+  if (await run(() => accounts.closePosition(a.value.id, id, exit, exitReason.value, exitNote.value.trim()))) closingId.value = null
 }
 
 async function remove(): Promise<void> {
@@ -110,6 +115,7 @@ async function remove(): Promise<void> {
       <div class="flex flex-wrap items-center gap-1">
         <span v-if="a.target_lock" class="badge badge-warn" data-testid="target-lock">target lock</span>
         <span v-if="a.soft_stop_hit" class="badge badge-short">soft stop</span>
+        <span v-if="a.month?.blocked" class="badge badge-short" data-testid="month-blocked">лимит месяца</span>
         <span v-if="isSelected" class="badge badge-accent">текущий</span>
         <button v-else type="button" class="btn btn-sm" @click="accounts.select(a.id)">Сделать текущим</button>
       </div>
@@ -180,6 +186,24 @@ async function remove(): Promise<void> {
       </div>
     </div>
 
+    <div v-if="a.month?.enabled" data-testid="month-rule">
+      <div class="flex justify-between text-muted-sm">
+        <span title="Элдер: убыток с начала месяца плюс риск открытых позиций до стопов — не больше 6% баланса на начало месяца"
+          >Месячный лимит (правило {{ fmtShare(a.month.limit_pct) }} Элдера)</span
+        >
+        <b class="num text-fg" data-field="month-room">{{ fmtUsd(a.month.room_usd, 2) }}</b>
+      </div>
+      <RoomBar :room="a.month.room_usd" :limit="a.month.limit_usd" />
+      <div class="num text-xs text-muted">
+        {{ a.month.month }}: результат <span :class="signClass(a.month.result_usd)">{{ fmtUsd(a.month.result_usd, 2, true) }}</span> · риск открытых
+        {{ fmtUsd(a.month.open_risk_usd, 2) }} · занято {{ fmtUsd(a.month.used_usd, 2) }} из {{ fmtUsd(a.month.limit_usd, 2) }} · старт месяца
+        {{ fmtUsd(a.month.start_balance, 2) }}
+      </div>
+      <p v-if="a.month.blocked" class="mt-1 rounded-md border border-short/40 bg-short/10 px-2 py-1.5 text-sm text-short">
+        Лимит месяца исчерпан: до конца месяца новые сделки не открываются (правило 6% Элдера).
+      </p>
+    </div>
+
     <div>
       <div class="mb-1 flex items-center justify-between gap-2">
         <h3 class="text-sm font-semibold">Открытые позиции ({{ a.positions.length }})</h3>
@@ -216,8 +240,19 @@ async function remove(): Promise<void> {
               <td class="num">{{ fmtPrice(p.sl) }} / {{ fmtPrice(p.tp) }}</td>
               <td class="left num">{{ fmtDateTime(p.opened_at, prefs.tz, { year: false }) }}</td>
               <td>
-                <form v-if="closingId === p.id" class="flex items-center gap-1" @submit.prevent="confirmClose">
+                <form v-if="closingId === p.id" class="flex flex-wrap items-center gap-1" data-testid="close-form" @submit.prevent="confirmClose">
                   <input v-model="exitInput" class="input num w-24 py-0.5" placeholder="цена выхода" aria-label="Цена выхода" />
+                  <select v-model="exitReason" class="input py-0.5 text-sm" aria-label="Причина выхода" data-testid="exit-reason">
+                    <option v-for="r in EXIT_REASONS" :key="r" :value="r">{{ EXIT_REASON_RU[r] }}</option>
+                  </select>
+                  <input
+                    v-model="exitNote"
+                    class="input w-40 py-0.5 text-sm"
+                    maxlength="500"
+                    placeholder="заметка: почему вышел"
+                    aria-label="Заметка к сделке"
+                    data-testid="exit-note"
+                  />
                   <button type="submit" class="btn btn-sm btn-primary" :disabled="busy">Закрыть</button>
                   <button type="button" class="btn btn-sm" @click="closingId = null">✕</button>
                 </form>
@@ -245,6 +280,9 @@ async function remove(): Promise<void> {
         <option value="passed">{{ ACCOUNT_STATUS_RU.passed }}</option>
         <option value="failed">{{ ACCOUNT_STATUS_RU.failed }}</option>
       </select>
+      <RouterLink :to="{ path: '/journal', query: { account: String(a.id) } }" class="text-sm hover:text-accent" data-testid="journal-link"
+        >Журнал сделок →</RouterLink
+      >
       <span v-if="error" class="text-sm text-short" role="alert">{{ error }}</span>
       <div class="ml-auto flex items-center gap-1">
         <template v-if="confirmDelete">

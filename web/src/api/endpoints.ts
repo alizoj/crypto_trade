@@ -9,8 +9,14 @@ import type {
   BacktestRun,
   BarsResponse,
   CalibrationLive,
+  ExitReason,
   Group,
   Instrument,
+  JournalPatch,
+  JournalQuery,
+  JournalResponse,
+  JournalStats,
+  JournalTrade,
   LoginRequest,
   Meta,
   OkResponse,
@@ -72,8 +78,21 @@ export const api = {
   patchAccount: (id: number, body: AccountPatch) => http.patch<Account>(`/api/accounts/${id}`, body),
   deleteAccount: (id: number) => http.del<OkResponse>(`/api/accounts/${id}`),
   addPosition: (id: number, body: PositionCreate) => http.post<Account>(`/api/accounts/${id}/positions`, body),
-  closePosition: (id: number, posId: number, exitPrice?: number) =>
-    http.del<Account>(`/api/accounts/${id}/positions/${posId}`, { exit_price: exitPrice }),
+  closePosition: (id: number, posId: number, exitPrice?: number, reason?: ExitReason, note?: string) =>
+    http.del<Account>(`/api/accounts/${id}/positions/${posId}`, { exit_price: exitPrice, reason, note: note || undefined }),
+
+  // --- journal (Элдер: таблица и дневник; Дуглас: серии по 20 сделок) ---
+  journal: (q: JournalQuery = {}) =>
+    http.get<JournalResponse>('/api/journal', {
+      account_id: q.account_id ?? undefined,
+      from: q.from,
+      to: q.to,
+      limit: q.limit ?? 100,
+      offset: q.offset ?? 0,
+    }),
+  journalStats: (q: JournalQuery = {}) =>
+    http.get<JournalStats>('/api/journal/stats', { account_id: q.account_id ?? undefined, from: q.from, to: q.to }),
+  patchJournal: (id: number, body: JournalPatch) => http.patch<JournalTrade>(`/api/journal/${id}`, body),
 
   // --- backtests ---
   backtests: (kind?: BacktestKind | '', limit = 50) => http.get<BacktestRun[]>('/api/backtests', { kind, limit }),

@@ -15,7 +15,8 @@ const isMock = import.meta.env.VITE_MOCK === '1'
 const nav = [
   { to: '/', label: 'Скринер', exact: true },
   { to: '/accounts', label: 'Счета' },
-  { to: '/signals', label: 'Журнал' },
+  { to: '/signals', label: 'Сигналы' },
+  { to: '/journal', label: 'Сделки' },
   { to: '/backtests', label: 'Бэктесты' },
 ]
 

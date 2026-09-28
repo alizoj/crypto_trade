@@ -27,8 +27,9 @@ from quant.calibration.model import live_check, load_active, prob_for, wilson
 from quant.config import get_settings, load_challenge_config, load_strategy_config
 from quant.db import session_scope
 from quant.db.models import Account as AccountRow
-from quant.db.models import BacktestRun, LiveSignal, Trial
+from quant.db.models import BacktestRun, JournalTrade, LiveSignal, Trial
 from quant.live.accounts import account_json, add_position, close_position, create_account, list_accounts, to_propsim
+from quant.live.journal import EXIT_REASONS, expected_r, journal_stats, month_room, trade_json
 from quant.risk.governor import plan_trade
 from quant.sessions import is_open, next_change
 from quant.timeutil import next_reset_min, now_utc, parse_dt, to_min, from_min
@@ -70,6 +71,11 @@ class PositionIn(BaseModel):
 
 class DecisionIn(BaseModel):
     taken: bool
+
+
+class JournalPatch(BaseModel):
+    note: str | None = Field(None, max_length=4000)
+    exit_reason: str | None = None
 
 
 def create_app(*, bus: Bus | None = None, service: Any | None = None, strategy: str = "confluence_v1") -> FastAPI:
@@ -246,7 +252,8 @@ def create_app(*, bus: Bus | None = None, service: Any | None = None, strategy: 
                         row = s.get(AccountRow, account_id, options=[selectinload(AccountRow.positions)])
                         if row is not None:
                             acc = to_propsim(row, marks)
-                            pl_ = plan_trade(acc, inst, side=1 if side == "long" else -1, entry=entry, sl=sl_, risk=risk)
+                            pl_ = plan_trade(acc, inst, side=1 if side == "long" else -1, entry=entry, sl=sl_, risk=risk,
+                                             month_room_usd=month_room(s, row, marks, risk.monthly_loss_pct))
                             plan.update(pl_.as_dict())
                             plan["account_id"] = account_id
             sides[side] = {
@@ -347,7 +354,7 @@ def create_app(*, bus: Bus | None = None, service: Any | None = None, strategy: 
     # ------------------------------------------------------------------ счета
 
     def _acc_out(row: AccountRow) -> dict:
-        return account_json(row, mv.marks(), risk.soft_daily_stop)
+        return account_json(row, mv.marks(), risk.soft_daily_stop, risk.monthly_loss_pct)
 
     async def _acc_changed(row_json: dict) -> None:
         await bus.publish("accounts", row_json)
@@ -413,17 +420,62 @@ def create_app(*, bus: Bus | None = None, service: Any | None = None, strategy: 
         return out
 
     @app.delete("/api/accounts/{aid}/positions/{pid}")
-    async def position_close(aid: int, pid: int, exit_price: float, user: str = User):
+    async def position_close(aid: int, pid: int, exit_price: float, reason: str = "manual",
+                             note: str = Query("", max_length=4000), user: str = User):
+        if reason not in EXIT_REASONS:
+            raise HTTPException(422, f"reason: одно из {', '.join(EXIT_REASONS)}")
         with session_scope() as s:
             row = _get_acc(s, aid)
             try:
-                close_position(s, row, pid, exit_price)
+                close_position(s, row, pid, exit_price, reason=reason, note=note)
             except StopIteration:
                 raise HTTPException(404, "нет позиции") from None
             s.refresh(row)
             out = _acc_out(row)
         await _acc_changed(out)
         return out
+
+    # ------------------------------------------------------------------ журнал сделок
+
+    def _journal_q(account_id: int | None, from_: str | None, to: str | None):  # noqa: ANN202
+        q = select(JournalTrade)
+        if account_id is not None:
+            q = q.where(JournalTrade.account_id == account_id)
+        if from_:
+            q = q.where(JournalTrade.closed_at >= parse_dt(from_))
+        if to:
+            q = q.where(JournalTrade.closed_at < parse_dt(to))
+        return q
+
+    @app.get("/api/journal")
+    def journal(account_id: int | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None,
+                limit: int = Query(100, le=1000), offset: int = 0, user: str = User):
+        with session_scope() as s:
+            q = _journal_q(account_id, from_, to)
+            total = s.scalar(select(func.count()).select_from(q.subquery()))
+            items = s.scalars(q.order_by(JournalTrade.closed_at.desc(), JournalTrade.id.desc())
+                              .limit(limit).offset(offset)).all()
+            return {"total": int(total or 0), "items": [trade_json(t) for t in items]}
+
+    @app.get("/api/journal/stats")
+    def journal_summary(account_id: int | None = None, from_: str | None = Query(None, alias="from"),
+                        to: str | None = None, user: str = User):
+        with session_scope() as s:
+            trades = s.scalars(_journal_q(account_id, from_, to)).all()
+            return journal_stats(trades, expected=expected_r(s, trades))
+
+    @app.patch("/api/journal/{tid}")
+    def journal_patch(tid: int, body: JournalPatch, user: str = User):
+        if body.exit_reason is not None and body.exit_reason not in EXIT_REASONS:
+            raise HTTPException(422, f"exit_reason: одно из {', '.join(EXIT_REASONS)}")
+        with session_scope() as s:
+            t = s.get(JournalTrade, tid)
+            if t is None:
+                raise HTTPException(404, "нет сделки")
+            for k, v in body.model_dump(exclude_none=True).items():
+                setattr(t, k, v)
+            s.flush()
+            return trade_json(t)
 
     # ------------------------------------------------------------------ бэктесты
 

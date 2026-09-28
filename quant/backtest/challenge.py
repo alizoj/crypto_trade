@@ -29,6 +29,9 @@ class RiskParams:
     target_lock: bool = True
     target_lock_notional_usd: float = 100.0
     min_notional_usd: float = 10.0
+    # правило 6% Элдера: месячный убыток + риск открытых позиций <= доли баланса на начало месяца (0 — выкл).
+    # Только live-план (quant.risk.governor); numba-симулятор бэктеста его не моделирует.
+    monthly_loss_pct: float = 0.0
 
     @classmethod
     def from_config(cls, risk: dict | None, **overrides: Any) -> "RiskParams":

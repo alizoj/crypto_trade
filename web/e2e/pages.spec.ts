@@ -73,15 +73,57 @@ test.describe('Счета', () => {
     await card.getByTestId('pos-submit').click()
     await expect(card.getByTestId('position-row')).toHaveCount(1)
     await card.getByTestId('close-position').click()
+    await card.getByTestId('exit-reason').selectOption('tp')
+    await card.getByTestId('exit-note').fill('e2e: по плану')
     await card.getByRole('button', { name: 'Закрыть', exact: true }).click()
     await expect(card.getByTestId('position-row')).toHaveCount(0)
+
+    // сделка ушла в журнал с причиной и заметкой
+    await card.getByTestId('journal-link').click()
+    await expect(page).toHaveURL(new RegExp(String.raw`/journal\?account=${id}$`))
+    await expect(page.getByTestId('journal-row')).toHaveCount(1)
+    await expect(page.getByTestId('journal-row').first()).toContainText('e2e: по плану')
+    await expect(page.getByTestId('journal-reason').first()).toHaveValue('tp')
+    await expect(page.locator('[data-field="series-progress"]')).toHaveText('1/20')
+  })
+})
+
+test.describe('Журнал сделок', () => {
+  test('серии по 20, итог = API, правка заметки и причины', async ({ page }) => {
+    const errors = trackErrors(page)
+    await page.getByRole('link', { name: 'Сделки' }).click()
+    await expect(page).toHaveURL(/\/journal$/)
+    const list = await apiGet<{ total: number; items: { id: number; pnl_usd: number }[] }>(page, '/api/journal?limit=100')
+    const st = await apiGet<{ total: { n: number }; series: { n: number; complete: boolean }[] }>(page, '/api/journal/stats')
+    await expect(page.getByTestId('journal-row')).toHaveCount(Math.min(100, list.total))
+    await expect(page.locator('[data-field="total-n"]')).toHaveText(String(st.total.n))
+    const cur = st.series.at(-1)!
+    await expect(page.locator('[data-field="series-progress"]')).toHaveText(`${cur.n}/20`)
+    await expect(page.getByTestId('series-row')).toHaveCount(st.series.length - 1)
+    const first = page.getByTestId('journal-row').first()
+    await expect(first).toHaveAttribute('data-trade-id', String(list.items[0]!.id))
+    expectDisplayed(await first.locator('[data-field="pnl"]').innerText(), list.items[0]!.pnl_usd, 1, 'pnl')
+
+    await first.getByTestId('note-edit').click()
+    await first.getByTestId('note-input').fill('закрыл раньше из страха')
+    await first.getByTestId('note-save').click()
+    await expect(first).toContainText('закрыл раньше из страха')
+    await first.getByTestId('journal-reason').selectOption('other')
+    await expect
+      .poll(async () => (await apiGet<{ items: { id: number; note: string; exit_reason: string }[] }>(page, '/api/journal?limit=1')).items[0])
+      .toMatchObject({ note: 'закрыл раньше из страха', exit_reason: 'other' })
+
+    // фильтр по счёту
+    await page.getByTestId('jf-account').selectOption({ index: 2 })
+    await expect(page).toHaveURL(/account=\d+/)
+    expect(errors).toEqual([])
   })
 })
 
 test.describe('Журнал сигналов', () => {
   test('таблица, пагинация, «взял/пропустил», калибровка', async ({ page }) => {
     const errors = trackErrors(page)
-    await page.getByRole('link', { name: 'Журнал' }).click()
+    await page.getByRole('link', { name: 'Сигналы' }).click()
     const first = await apiGet<{ total: number; items: { id: number; outcome_r: number | null; status: string }[] }>(
       page,
       '/api/signals?limit=50&offset=0',

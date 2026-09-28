@@ -374,6 +374,106 @@ export interface Account {
   status: AccountStatus
   positions: Position[]
   updated_at: string
+  /** правило 6% Элдера; null — нет данных */
+  month: MonthStatus | null
+}
+
+/** Правило 6% Элдера: убыток с начала месяца + риск открытых позиций <= limit_pct баланса на начало месяца. */
+export interface MonthStatus {
+  /** YYYY-MM по проп-календарю (00:00 UTC+4) */
+  month: string
+  start_balance: number
+  /** баланс − баланс на начало месяца */
+  result_usd: number
+  open_risk_usd: number
+  limit_pct: number
+  limit_usd: number
+  used_usd: number
+  /** null — правило выключено */
+  room_usd: number | null
+  enabled: boolean
+  blocked: boolean
+}
+
+// ---------- Журнал сделок ----------
+
+export type ExitReason = 'manual' | 'sl' | 'tp' | 'timeout' | 'other'
+
+export interface JournalTrade {
+  id: number
+  account_id: number
+  hh_symbol: string
+  side: Side
+  qty: number
+  entry_price: number
+  exit_price: number
+  sl: number | null
+  tp: number | null
+  opened_at: string
+  closed_at: string
+  signal_id: number | null
+  strategy: string
+  fees_usd: number
+  /** за вычетом комиссий входа и выхода */
+  pnl_usd: number
+  /** qty × |вход − SL|; без стопа — null */
+  risk_usd: number | null
+  r_multiple: number | null
+  exit_reason: ExitReason
+  note: string
+}
+
+export interface JournalResponse {
+  total: number
+  items: JournalTrade[]
+}
+
+export interface JournalBlock {
+  n: number
+  wins: number
+  win_rate: number | null
+  pnl_usd: number
+  fees_usd: number
+  n_r: number
+  sum_r: number | null
+  avg_r: number | null
+  avg_win_r: number | null
+  avg_loss_r: number | null
+  profit_factor: number | null
+  max_loss_streak: number
+  /** средний ev_r сигналов, по которым открыты сделки */
+  expected_avg_r: number | null
+  n_expected: number
+  from_signals: number
+  without_stop: number
+  /** убыток больше 1.1R — стоп не соблюдён */
+  stop_breaches: number
+  first_closed_at: string | null
+  last_closed_at: string | null
+}
+
+export interface JournalSeries extends JournalBlock {
+  index: number
+  complete: boolean
+}
+
+export interface JournalStats {
+  series_size: number
+  total: JournalBlock
+  series: JournalSeries[]
+}
+
+export interface JournalQuery {
+  account_id?: number | null
+  from?: string
+  to?: string
+  limit?: number
+  offset?: number
+}
+
+export interface JournalPatch {
+  note?: string
+  exit_reason?: ExitReason
 }
 
 export interface AccountCreate {

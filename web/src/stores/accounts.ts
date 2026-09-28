@@ -2,7 +2,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '@/api/endpoints'
-import type { Account, AccountCreate, AccountPatch, PositionCreate } from '@/api/types'
+import type { Account, AccountCreate, AccountPatch, ExitReason, PositionCreate } from '@/api/types'
 import { errorMessage } from '@/api/client'
 import { usePrefsStore } from './prefs'
 
@@ -73,8 +73,9 @@ export const useAccountsStore = defineStore('accounts', () => {
     return acc
   }
 
-  async function closePosition(id: number, posId: number, exitPrice?: number): Promise<Account> {
-    const acc = await api.closePosition(id, posId, exitPrice)
+  /** Закрытие пишет сделку в журнал: причина выхода и заметка (дневник трейдера). */
+  async function closePosition(id: number, posId: number, exitPrice?: number, reason?: ExitReason, note?: string): Promise<Account> {
+    const acc = await api.closePosition(id, posId, exitPrice, reason, note)
     applyAccount(acc)
     return acc
   }

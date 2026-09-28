@@ -34,6 +34,8 @@ import {
   signalSideFor,
 } from './market'
 import { hashSeed, pick, rng, round, roundPrice, wilson } from './math'
+import { monthStatus, recordClose, seedJournal, setMonthStart } from './journal'
+import type { ExitReason } from '@/api/types'
 
 export function iso(ms: number): string {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -100,6 +102,7 @@ export function recalcAccount(a: Account): Account {
     soft_stop_hit: dailyLimit - dailyRoom >= dailyLimit * SOFT_STOP_SHARE,
     target_lock: target !== null && a.balance >= target && a.trading_days < rules.minDays,
     updated_at: iso(Date.now()),
+    month: monthStatus({ id: a.id, balance: a.balance, positions }),
   }
 }
 
@@ -154,6 +157,7 @@ export function makePlan(row: ScreenerRow, side: Side, acc: Account | null, expi
   else if (prob.p < MIN_PROB) reason = `P = ${(prob.p * 100).toFixed(0)}% ниже порога min_prob (${Math.round(MIN_PROB * 100)}%)`
   else if (acc && acc.status !== 'active') reason = 'Счёт не активен'
   else if (acc && acc.soft_stop_hit) reason = 'Soft daily stop: новые входы заблокированы до ресета 20:00 UTC'
+  else if (acc?.month?.blocked) reason = 'Правило 6% Элдера: месячный лимит убытка и риска исчерпан — до конца месяца без новых сделок'
   plan.blocked_reason = reason
   return plan
 }
@@ -345,6 +349,7 @@ function baseAccounts(): Account[] {
       { id: 2, hh_symbol: 'XAUUSDT', side: 'short', qty: 0.6, entry_price: roundPrice(xau * 1.003), notional_usd: round(0.6 * xau * 1.003, 2), mark_price: null, unrealized_usd: null, opened_at: iso(Date.now() - 2 * 3600e3), sl: roundPrice(xau * 1.012), tp: roundPrice(xau * 0.99) },
     ],
     updated_at: now,
+    month: null,
   }
   const a2: Account = {
     id: 2,
@@ -373,7 +378,11 @@ function baseAccounts(): Account[] {
       { id: 3, hh_symbol: 'ETHUSDT', side: 'long', qty: 0.2, entry_price: roundPrice(eth * 0.998), notional_usd: round(0.2 * eth * 0.998, 2), mark_price: null, unrealized_usd: null, opened_at: iso(Date.now() - 50 * 60e3), sl: roundPrice(eth * 0.985), tp: null },
     ],
     updated_at: now,
+    month: null,
   }
+  // баланс на начало месяца — база правила 6% Элдера
+  setMonthStart(a1.id, 10150)
+  setMonthStart(a2.id, 26900)
   return [recalcAccount(a1), recalcAccount(a2)]
 }
 
@@ -430,6 +439,7 @@ export function getDb(): Db {
   const accounts = baseAccounts()
   const history = buildHistory(r)
   const active = buildActive(accounts, 1001)
+  seedJournal(accounts, markPrice, history.filter((s) => s.ev_r !== null).map((s) => s.id))
   db = {
     signals: [...history, ...active],
     accounts,
@@ -463,6 +473,11 @@ export function markersFor(sym: string, tf: Timeframe): ChartMarker[] {
   return out
 }
 
+/** ev_r сигнала — ожидание серии в журнале. */
+export function signalEv(id: number): number | null {
+  return getDb().signals.find((s) => s.id === id)?.ev_r ?? null
+}
+
 export function activeSignalFor(sym: string, tf: Timeframe): Signal | null {
   const row = getRowCore(sym, tf)?.row
   if (!row?.active_signal_id) return null
@@ -471,6 +486,7 @@ export function activeSignalFor(sym: string, tf: Timeframe): Signal | null {
 
 export function createAccount(body: AccountCreate): Account {
   const d = getDb()
+  setMonthStart(d.nextAccountId, body.size)
   const acc: Account = recalcAccount({
     id: d.nextAccountId++,
     name: body.name,
@@ -496,6 +512,7 @@ export function createAccount(body: AccountCreate): Account {
     status: 'active',
     positions: [],
     updated_at: iso(Date.now()),
+    month: null,
   })
   d.accounts.push(acc)
   return acc
@@ -527,10 +544,11 @@ export function addPosition(acc: Account, body: PositionCreate): Account {
   return replaceAccount({ ...acc, balance: round(acc.balance - fee, 2), positions: [...acc.positions, pos] })
 }
 
-export function closePosition(acc: Account, posId: number, exitPrice?: number): Account | null {
+export function closePosition(acc: Account, posId: number, exitPrice?: number, reason: ExitReason = 'manual', note = ''): Account | null {
   const pos = acc.positions.find((p) => p.id === posId)
   if (!pos) return null
   const exit = exitPrice ?? pos.mark_price ?? pos.entry_price
+  recordClose(acc, pos, exit, reason, note)
   const dir = pos.side === 'long' ? 1 : -1
   const pnl = (exit - pos.entry_price) * pos.qty * dir - exit * pos.qty * TAKER_FEE
   return replaceAccount({ ...acc, balance: round(acc.balance + pnl, 2), positions: acc.positions.filter((p) => p.id !== posId) })

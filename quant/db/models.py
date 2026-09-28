@@ -195,6 +195,51 @@ class Account(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     positions: Mapped[list["ManualPosition"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+    journal: Mapped[list["JournalTrade"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+    months: Mapped[list["AccountMonth"]] = relationship(back_populates="account", cascade="all, delete-orphan")
+
+
+class JournalTrade(Base):
+    """Журнал закрытых сделок: таблица и дневник трейдера (Элдер), оценка сериями по 20 сделок (Дуглас).
+
+    pnl_usd — результат за вычетом комиссий входа и выхода; risk_usd — начальный риск до стопа (qty × |вход − SL|),
+    r_multiple = pnl_usd / risk_usd (нет стопа — нет R).
+    """
+
+    __tablename__ = "journal_trades"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    hh_symbol: Mapped[str] = mapped_column(String(32))
+    side: Mapped[str] = mapped_column(String(8))
+    qty: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    exit_price: Mapped[float] = mapped_column(Float)
+    sl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    signal_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy: Mapped[str] = mapped_column(String(64), default="")
+    fees_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    pnl_usd: Mapped[float] = mapped_column(Float)
+    risk_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    r_multiple: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str] = mapped_column(String(16), default="manual")   # manual|sl|tp|timeout|other
+    note: Mapped[str] = mapped_column(Text, default="")
+    account: Mapped[Account] = relationship(back_populates="journal")
+
+
+class AccountMonth(Base):
+    """Баланс на начало месяца (проп-календарь) — база месячного лимита убытка (правило 6% Элдера)."""
+
+    __tablename__ = "account_months"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    month: Mapped[str] = mapped_column(String(7))                 # YYYY-MM
+    start_balance: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    account: Mapped[Account] = relationship(back_populates="months")
+    __table_args__ = (UniqueConstraint("account_id", "month"),)
 
 
 class ManualPosition(Base):

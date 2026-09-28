@@ -1,6 +1,7 @@
 """Счета пользователя в live: состояние из БД (ручной ввод) → propsim.Account с текущими mark-ценами.
 
 Используется API (экран 3, шапка скринера), сервисом сигналов (план сделки) и ботом (/balance, /pos).
+Закрытая позиция записывается в журнал сделок (quant.live.journal).
 """
 
 from __future__ import annotations
@@ -9,11 +10,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, object_session, selectinload
 
 from quant.config import load_challenge_config
 from quant.db.models import Account as AccountRow
-from quant.db.models import ManualPosition
+from quant.db.models import JournalTrade, ManualPosition
+from quant.live.journal import ensure_month, month_status, record_close
 from quant.propsim import Account, Position
 from quant.timeutil import minute_of_day, now_utc, prop_day_id, to_min
 
@@ -37,8 +39,12 @@ def to_propsim(row: AccountRow, marks: dict[str, float], now: datetime | None = 
     return acc
 
 
-def account_json(row: AccountRow, marks: dict[str, float], soft_stop: float = 0.6) -> dict[str, Any]:
+def account_json(row: AccountRow, marks: dict[str, float], soft_stop: float = 0.6,
+                 monthly_loss_pct: float = 0.0) -> dict[str, Any]:
+    """Состояние счёта для API/бота; month — правило 6% Элдера (нужна сессия БД, иначе None)."""
     acc = to_propsim(row, marks)
+    sess = object_session(row)
+    month = month_status(sess, row, marks, monthly_loss_pct) if sess is not None else None
     tb = acc.target_balance
     eq = acc.equity()
     positions = []
@@ -61,7 +67,7 @@ def account_json(row: AccountRow, marks: dict[str, float], soft_stop: float = 0.
         "trading_days": acc.trading_days_count, "min_trading_days": acc.min_trading_days,
         "soft_stop_hit": (-daily_loss) >= soft_stop * acc.daily_limit_usd,
         "target_lock": acc.target_reached and acc.trading_days_count < acc.min_trading_days,
-        "status": row.status, "positions": positions, "updated_at": _iso(row.updated_at),
+        "status": row.status, "positions": positions, "updated_at": _iso(row.updated_at), "month": month,
     }
 
 
@@ -90,6 +96,7 @@ def create_account(s: Session, *, name: str, challenge_type: str, size: float, s
                      status="active", dlp_available=cfg.options.daily_loss_protection)
     s.add(row)
     s.flush()
+    ensure_month(s, row)
     return row
 
 
@@ -110,15 +117,19 @@ def add_position(s: Session, row: AccountRow, *, hh_symbol: str, side: str, qty:
     return p
 
 
-def close_position(s: Session, row: AccountRow, pos_id: int, exit_price: float) -> None:
+def close_position(s: Session, row: AccountRow, pos_id: int, exit_price: float, *, reason: str = "manual",
+                   note: str = "") -> JournalTrade:
+    """Закрыть позицию: баланс += PnL − комиссия выхода; сделка уходит в журнал (quant.live.journal)."""
     cfg = load_challenge_config()
     p = next(p for p in row.positions if p.id == pos_id)
     side = 1 if p.side == "long" else -1
-    fee = p.qty * exit_price * cfg.market(row.market).fees.taker
-    row.balance += side * p.qty * (exit_price - p.entry_price) - fee
+    taker = cfg.market(row.market).fees.taker
+    trade = record_close(s, row, p, exit_price, fee_rate=taker, reason=reason, note=note)
+    row.balance += side * p.qty * (exit_price - p.entry_price) - p.qty * exit_price * taker
     row.positions.remove(p)
     s.delete(p)
     s.flush()
+    return trade
 
 
 def roll_day(s: Session, now: datetime | None = None) -> int:
@@ -129,6 +140,7 @@ def roll_day(s: Session, now: datetime | None = None) -> int:
     for row in list_accounts(s, active_only=True):
         mk = cfg.market(row.market)
         m = to_min(now)
+        ensure_month(s, row, now)             # баланс на начало месяца — для правила 6%
         if minute_of_day(m) < mk.day_boundary_min + mk.reset_window_minutes and minute_of_day(m) >= mk.day_boundary_min:
             continue
         last = row.start_of_day_at

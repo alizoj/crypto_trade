@@ -20,6 +20,7 @@ const routes: RouteRecordRaw[] = [
   },
   { path: '/accounts', name: 'accounts', component: () => import('@/views/AccountsView.vue'), meta: { title: 'Счета' } },
   { path: '/signals', name: 'signals', component: () => import('@/views/SignalsView.vue'), meta: { title: 'Журнал сигналов' } },
+  { path: '/journal', name: 'journal', component: () => import('@/views/JournalView.vue'), meta: { title: 'Журнал сделок' } },
   { path: '/backtests', name: 'backtests', component: () => import('@/views/BacktestsView.vue'), meta: { title: 'Бэктесты' } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

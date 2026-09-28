@@ -14,11 +14,13 @@ from datetime import datetime, timezone
 
 from quant.analysis.text import fmt_price
 from quant.bus import Bus
-from quant.config import Settings, get_settings, load_challenge_config
+from quant.backtest.challenge import RiskParams
+from quant.config import Settings, get_settings, load_challenge_config, load_strategy_config
 from quant.db import session_scope
 from quant.db.models import Account as AccountRow
 from quant.db.models import LiveSignal
 from quant.live.accounts import account_json, add_position, close_position, list_accounts
+from quant.live.journal import EXIT_REASONS, format_stats
 from quant.timeutil import next_reset_min, now_utc, to_min
 
 log = logging.getLogger(__name__)
@@ -39,6 +41,18 @@ def _usd(x: float | None) -> str:
 def _hm(minutes: float) -> str:
     m = int(max(0, minutes))
     return f"{m // 60}ч {m % 60:02d}м"
+
+
+def _month_line(m: dict | None) -> str:
+    """Правило 6% Элдера одной строкой для /status."""
+    if not m:
+        return ""
+    res = f"\n  месяц {m['month']}: {m['result_usd']:+,.0f}$"
+    if m["enabled"]:
+        res += f", занято {m['used_usd']:,.0f} из {m['limit_usd']:,.0f}$ (лимит {m['limit_pct'] * 100:.0f}%)"
+        if m["blocked"]:
+            res += " · ЛИМИТ МЕСЯЦА — без новых сделок"
+    return res
 
 
 def format_signal(sig: dict, *, now: datetime | None = None, with_account: bool = True) -> str:
@@ -96,11 +110,12 @@ def in_quiet_hours(spec: str, now: datetime) -> bool:
 
 
 class TelegramBot:
-    def __init__(self, bus: Bus, settings: Settings | None = None):
+    def __init__(self, bus: Bus, settings: Settings | None = None, strategy: str = "confluence_v1"):
         from aiogram import Bot, Dispatcher, F, Router
         from aiogram.filters import Command
 
         self.s = settings or get_settings()
+        self.monthly_loss_pct = RiskParams.from_config(load_strategy_config(strategy).get("risk")).monthly_loss_pct
         if not self.s.telegram_token:
             raise RuntimeError("QUANT_TELEGRAM_TOKEN не задан")
         self.bus = bus
@@ -116,6 +131,7 @@ class TelegramBot:
         r.message(Command("equity"))(self.cmd_status)
         r.message(Command("pos"))(self.cmd_pos)
         r.message(Command("signals"))(self.cmd_signals)
+        r.message(Command("journal"))(self.cmd_journal)
         r.callback_query(F.data.startswith("take:") | F.data.startswith("skip:"))(self.on_decision)
         self.dp.include_router(r)
 
@@ -189,12 +205,14 @@ class TelegramBot:
 
     async def cmd_start(self, message) -> None:  # noqa: ANN001
         await message.answer("Бот HashHedge Quant. Команды:\n/status — счета\n/balance <id> <баланс>\n"
-                             "/pos add <id> <SYMBOL> <long|short> <qty> <price> [sl] [tp]\n/pos close <id> <pos_id> <price>\n"
+                             "/pos add <id> <SYMBOL> <long|short> <qty> <price> [sl] [tp]\n"
+                             "/pos close <id> <pos_id> <price> [sl|tp|manual|timeout|other] [заметка]\n"
+                             "/journal [id] — журнал сделок: серии по 20, итоги, правило 6%\n"
                              "/signals — активные сигналы")
 
     async def cmd_status(self, message) -> None:  # noqa: ANN001
         with session_scope() as s:
-            rows = [account_json(a, {}) for a in list_accounts(s)]
+            rows = [account_json(a, {}, monthly_loss_pct=self.monthly_loss_pct) for a in list_accounts(s)]
         if not rows:
             await message.answer("Счетов нет — добавьте в интерфейсе.")
             return
@@ -203,7 +221,8 @@ class TelegramBot:
             lines.append(f"#{a['id']} {a['name']} ({a['stage']}, ${a['size']:,.0f}): баланс {a['balance']:,.2f}, "
                          f"equity {a['equity']:,.2f}\n  запас: дневной {a['daily_room_usd']:,.0f}$, общий {a['total_room_usd']:,.0f}$ · "
                          f"дней {a['trading_days']}/{a['min_trading_days']}"
-                         + (" · SOFT STOP" if a["soft_stop_hit"] else "") + (" · добор дней" if a["target_lock"] else ""))
+                         + (" · SOFT STOP" if a["soft_stop_hit"] else "") + (" · добор дней" if a["target_lock"] else "")
+                         + _month_line(a.get("month")))
         await message.answer("\n".join(lines))
 
     async def cmd_balance(self, message) -> None:  # noqa: ANN001
@@ -230,11 +249,14 @@ class TelegramBot:
                     row = s.get(AccountRow, int(p[2]), options=[selectinload(AccountRow.positions)])
                     add_position(s, row, hh_symbol=p[3].upper(), side=p[4], qty=float(p[5]), entry_price=float(p[6]),
                                  sl=float(p[7]) if len(p) > 7 else None, tp=float(p[8]) if len(p) > 8 else None)
-                elif len(p) == 5 and p[1] == "close":
+                elif len(p) >= 5 and p[1] == "close":
                     row = s.get(AccountRow, int(p[2]), options=[selectinload(AccountRow.positions)])
-                    close_position(s, row, int(p[3]), float(p[4]))
+                    has_reason = len(p) > 5 and p[5] in EXIT_REASONS
+                    close_position(s, row, int(p[3]), float(p[4]), reason=p[5] if has_reason else "manual",
+                                   note=" ".join(p[6:] if has_reason else p[5:]))
                 else:
-                    await message.answer("Формат: /pos add <id> <SYMBOL> <long|short> <qty> <price> [sl] [tp] | /pos close <id> <pos_id> <price>")
+                    await message.answer("Формат: /pos add <id> <SYMBOL> <long|short> <qty> <price> [sl] [tp] | "
+                                         "/pos close <id> <pos_id> <price> [sl|tp|manual|timeout|other] [заметка]")
                     return
         except Exception as e:
             await message.answer(f"Ошибка: {e}")
@@ -249,6 +271,27 @@ class TelegramBot:
                              .order_by(LiveSignal.id.desc()).limit(20)).all()
             text = "\n".join(f"#{r.id} {r.hh_symbol} {r.side} {r.tf} score {r.score:.0f} — {STATUS_TEXT.get(r.status, r.status)}"
                              for r in rows) or "Активных сигналов нет."
+        await message.answer(text)
+
+    async def cmd_journal(self, message) -> None:  # noqa: ANN001
+        from sqlalchemy import select
+
+        from quant.db.models import JournalTrade
+        from quant.live.journal import expected_r, journal_stats
+
+        p = (message.text or "").split()
+        with session_scope() as s:
+            q = select(JournalTrade)
+            if len(p) > 1 and p[1].isdigit():
+                q = q.where(JournalTrade.account_id == int(p[1]))
+            trades = s.scalars(q).all()
+            text = format_stats(journal_stats(trades, expected=expected_r(s, trades)))
+            last = sorted(trades, key=lambda t: (t.closed_at, t.id))[-5:]
+            if last:
+                text += "\nПоследние сделки:\n" + "\n".join(
+                    f"  {t.hh_symbol} {t.side} {t.pnl_usd:+,.2f}$"
+                    + (f" ({t.r_multiple:+.2f}R)" if t.r_multiple is not None else "") + f" · {t.exit_reason}"
+                    for t in reversed(last))
         await message.answer(text)
 
     async def on_decision(self, cb) -> None:  # noqa: ANN001

@@ -35,6 +35,7 @@ from quant.config import get_settings, load_challenge_config, load_strategy_conf
 from quant.db import session_scope
 from quant.db.models import Alert, LiveSignal, SignalEvent
 from quant.live.accounts import account_json, list_accounts, roll_day, to_propsim
+from quant.live.journal import month_room
 from quant.risk.governor import plan_trade
 from quant.sessions import is_open
 from quant.strategies import get_strategy, load_params, with_overrides
@@ -391,7 +392,8 @@ class SignalService:
                 alt_risk = sum(p.qty * abs(p.entry_price - (p.sl or p.entry_price)) for p in acc_row.positions
                                if I.by_symbol().get(p.hh_symbol) and I.by_symbol()[p.hh_symbol].group == "crypto_alt")
                 plan = plan_trade(acc, st.inst, side=sgn, entry=r["entry_price"], sl=r["sl"], risk=self.risk,
-                                  alt_open_risk_usd=alt_risk).as_dict()
+                                  alt_open_risk_usd=alt_risk,
+                                  month_room_usd=month_room(s, acc_row, marks, self.risk.monthly_loss_pct)).as_dict()
                 plans[str(acc_row.id)] = {**plan, "account_id": acc_row.id, "account": acc_row.name}
                 if primary is None and plan["blocked_reason"] is None:
                     primary = plans[str(acc_row.id)]
@@ -490,4 +492,4 @@ class SignalService:
     async def accounts_snapshot(self) -> list[dict]:
         marks = await self._marks()
         with session_scope() as s:
-            return [account_json(a, marks, self.risk.soft_daily_stop) for a in list_accounts(s)]
+            return [account_json(a, marks, self.risk.soft_daily_stop, self.risk.monthly_loss_pct) for a in list_accounts(s)]

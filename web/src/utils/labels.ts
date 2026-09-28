@@ -4,6 +4,7 @@ import type {
   AssetClass,
   BacktestKind,
   ChallengeType,
+  ExitReason,
   Group,
   ScreenerStatus,
   Side,
@@ -51,6 +52,14 @@ export const STAGE_RU: Record<Stage, string> = { stage1: 'Стадия 1', stage
 export const CHALLENGE_RU: Record<ChallengeType, string> = {
   two_stage: 'Двухстадийный',
   one_stage: 'Одностадийный',
+}
+
+export const EXIT_REASON_RU: Record<ExitReason, string> = {
+  manual: 'Вручную',
+  sl: 'Стоп',
+  tp: 'Цель',
+  timeout: 'По времени',
+  other: 'Другое',
 }
 
 export const ACCOUNT_STATUS_RU: Record<AccountStatus, string> = {

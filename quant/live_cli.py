@@ -63,7 +63,7 @@ def _live_run(args: argparse.Namespace) -> int:
         if not args.no_bot and get_settings().telegram_token:
             from bot.telegram import TelegramBot
 
-            tasks.append(TelegramBot(bus).run())
+            tasks.append(TelegramBot(bus, strategy=args.strategy).run())
         await asyncio.gather(*tasks)
 
     asyncio.run(main())
@@ -150,7 +150,7 @@ def _bot(args: argparse.Namespace) -> int:
     from bot.telegram import TelegramBot
     from quant.bus import get_bus
 
-    asyncio.run(TelegramBot(get_bus()).run())
+    asyncio.run(TelegramBot(get_bus(), strategy=args.strategy).run())
     return 0
 
 
@@ -209,7 +209,9 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     b = sub.add_parser("bot", help="Telegram-бот")
     bs = b.add_subparsers(dest="cmd", required=True)
-    bs.add_parser("run").set_defaults(func=_bot)
+    br = bs.add_parser("run")
+    br.add_argument("--strategy", default="confluence_v1", help="чей блок risk (правило 6%%) показывать")
+    br.set_defaults(func=_bot)
 
     u = sub.add_parser("auth", help="пользователь веб-интерфейса (пароль)")
     us = u.add_subparsers(dest="cmd", required=True)

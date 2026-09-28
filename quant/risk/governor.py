@@ -30,7 +30,11 @@ class Plan:
 
 
 def plan_trade(acc: Account, inst: Instrument, *, side: int, entry: float, sl: float, risk: RiskParams,
-               entry_liquidity: str = "taker", expected_slip: float = 0.0, alt_open_risk_usd: float = 0.0) -> Plan:
+               entry_liquidity: str = "taker", expected_slip: float = 0.0, alt_open_risk_usd: float = 0.0,
+               month_room_usd: float | None = None) -> Plan:
+    """month_room_usd — свободный месячный лимит по правилу 6% Элдера (quant.live.journal.month_room);
+    None — правило не применяется (как в симуляторе)."""
+
     def blocked(reason: str) -> Plan:
         return Plan(None, None, None, None, None, reason)
 
@@ -50,10 +54,14 @@ def plan_trade(acc: Account, inst: Instrument, *, side: int, entry: float, sl: f
     room = min(d_room, t_room)
     if room <= 0:
         return blocked("нет запаса до лимита")
+    if month_room_usd is not None and month_room_usd <= 0:
+        return blocked("правило 6% Элдера: месячный лимит убытка и риска исчерпан — до конца месяца без новых сделок")
     if risk.fixed_risk_pct > 0:
         risk_usd = risk.fixed_risk_pct * acc.size
     else:
         risk_usd = min(risk.risk_per_trade * room, risk.abs_risk_cap_pct * acc.size)
+    if month_room_usd is not None:
+        risk_usd = min(risk_usd, month_room_usd)
     fees = acc.market.fees
     fee_in = fees.maker if entry_liquidity == "maker" else fees.taker
     per_unit = abs(entry - sl) + entry * (fee_in + fees.taker) + expected_slip

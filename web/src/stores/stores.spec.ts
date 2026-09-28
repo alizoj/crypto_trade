@@ -66,6 +66,7 @@ function account(id: number, over: Partial<Account> = {}): Account {
     status: 'active',
     positions: [],
     updated_at: '2026-09-23T00:00:00Z',
+    month: null,
     ...over,
   }
 }

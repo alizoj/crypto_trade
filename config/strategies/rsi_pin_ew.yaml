@@ -69,6 +69,7 @@ risk:
   target_lock: true
   target_lock_notional_usd: 100
   min_notional_usd: 10
+  monthly_loss_pct: 0.06    # правило 6% Элдера (только live-план): месячный убыток + риск открытых <= 6% баланса на начало месяца; 0 — выкл
 
 execution:
   exec_delay_min: [1, 10]
